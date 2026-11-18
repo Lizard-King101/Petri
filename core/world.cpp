@@ -410,6 +410,11 @@ void World::add_detritus(Cell& cell, unsigned amount) {
 }
 
 void World::recycle(Cell& cell) {
+    // Most cells hold neither carcass nor detritus. Both steps below are then
+    // no-ops, so skipping them leaves every result unchanged.
+    if (!cell.animal && !cell.detritus) {
+        return;
+    }
     const int decay = std::min(cell.animal, carcass_decay_);
     cell.animal -= decay;
     add_detritus(cell, decay);
@@ -419,6 +424,11 @@ void World::recycle(Cell& cell) {
 }
 
 void World::grow_plants(Cell& cell, unsigned tick) {
+    // Growth is capped by soil nutrients and by the plant ceiling, so a cell
+    // with either exhausted cannot change.
+    if (!cell.nutrients || cell.plants == 255) {
+        return;
+    }
     // Wetter regions can expand under the weather field. Slower regrowth keeps
     // those larger feeding grounds from multiplying the world's food supply.
     if (dynamic_environment_ && metrics_.ticks >= environment_warmup && tick % 32 == 8) {
