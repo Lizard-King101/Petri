@@ -21,9 +21,15 @@ namespace petri {
 
 enum class DietShape : std::uint8_t { meat, mixed, plant };
 
-// How a creature looks, derived from its genome.
+// How a creature looks, derived from its genome. Bit layout (32 bits):
+//   0-1   diet shape (DietShape)
+//   2-3   body color: the biome of the preferred moisture (Biome)
+//   4-5   back height in the 16x16 detail sprite, minus 4
+//   6-8   faction marker, 0 for none
+//   9-31  zero; reserved for morphology
+// A renderer must draw every look, including bits it does not yet use.
 struct Look {
-    std::uint16_t bits = 0;
+    std::uint32_t bits = 0;
 
     DietShape shape() const { return static_cast<DietShape>(bits & 3); }
     // Biome of the preferred moisture, used for body color in connected worlds.

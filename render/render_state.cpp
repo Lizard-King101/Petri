@@ -21,7 +21,7 @@ RenderActor actor_of(const Creature& creature) {
 Look look_of(const Genome& genes) {
     const int back = 7 - (Genome::maximum - genes.thrift) / 5;
     const auto body = static_cast<unsigned>(biome_at(genes.preferred_moisture()));
-    return {static_cast<std::uint16_t>(static_cast<unsigned>(diet_shape(genes)) | body << 2 |
+    return {static_cast<std::uint32_t>(static_cast<unsigned>(diet_shape(genes)) | body << 2 |
                                        unsigned(std::clamp(back, 4, 7) - 4) << 4 | (genes.faction & 7u) << 6)};
 }
 

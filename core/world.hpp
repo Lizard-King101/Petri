@@ -16,7 +16,9 @@ inline constexpr int width = 64;
 inline constexpr int height = 32;
 inline constexpr bool wide_world = false;
 #endif
-inline constexpr int capacity = 160;
+inline constexpr int capacity = 320;
+// Checkpoint versions 1-15 stored 160 creature slots.
+inline constexpr int legacy_capacity = 160;
 inline constexpr int founder_count = 32;
 inline constexpr int faction_count = 4;
 inline constexpr int body_mass = 8;
@@ -28,21 +30,27 @@ inline constexpr int climate_nodes = climate_columns * climate_rows;
 inline constexpr int rainfall_limit = 80;
 
 // Header, metadata, cells, creature slots, and a checksum.
-using LegacyCheckpoint = std::array<std::uint8_t, 6 + 37 + width * height * 4 + capacity * 34 + 8>;
-using ScavengingCheckpoint = std::array<std::uint8_t, 6 + 54 + width * height * 8 + capacity * 50 + 8>;
-using PredationCheckpoint = std::array<std::uint8_t, 6 + 71 + width * height * 8 + capacity * 50 + 8>;
-using FoodWebCheckpoint = std::array<std::uint8_t, 6 + 72 + width * height * 8 + capacity * 51 + 8>;
-using ConnectedCheckpoint = std::array<std::uint8_t, 6 + 121 + width * height * 8 + capacity * 53 + 8>;
-using IrregularCheckpoint = std::array<std::uint8_t, 6 + 122 + width * height * 8 + capacity * 53 + 8>;
-using SexualCheckpoint = std::array<std::uint8_t, 6 + 123 + width * height * 8 + capacity * 64 + 8>;
-using NestCheckpoint = std::array<std::uint8_t, 6 + 126 + 15 * 8 + width * height * 8 + capacity * 77 + 8>;
-using AdaptiveCheckpoint = std::array<std::uint8_t, 6 + 128 + 15 * 8 + width * height * 8 + capacity * 95 + 8>;
-using HuntTuningCheckpoint = std::array<std::uint8_t, 6 + 130 + 15 * 8 + width * height * 8 + capacity * 95 + 8>;
-using KinAvoidanceCheckpoint = std::array<std::uint8_t, 6 + 131 + 15 * 8 + width * height * 8 + capacity * 96 + 8>;
-using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * height * 8 + capacity * 96 + 8>;
-using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + capacity * 97 + 8>;
-using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
-using Checkpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
+using LegacyCheckpoint = std::array<std::uint8_t, 6 + 37 + width * height * 4 + legacy_capacity * 34 + 8>;
+using ScavengingCheckpoint = std::array<std::uint8_t, 6 + 54 + width * height * 8 + legacy_capacity * 50 + 8>;
+using PredationCheckpoint = std::array<std::uint8_t, 6 + 71 + width * height * 8 + legacy_capacity * 50 + 8>;
+using FoodWebCheckpoint = std::array<std::uint8_t, 6 + 72 + width * height * 8 + legacy_capacity * 51 + 8>;
+using ConnectedCheckpoint = std::array<std::uint8_t, 6 + 121 + width * height * 8 + legacy_capacity * 53 + 8>;
+using IrregularCheckpoint = std::array<std::uint8_t, 6 + 122 + width * height * 8 + legacy_capacity * 53 + 8>;
+using SexualCheckpoint = std::array<std::uint8_t, 6 + 123 + width * height * 8 + legacy_capacity * 64 + 8>;
+using NestCheckpoint = std::array<std::uint8_t, 6 + 126 + 15 * 8 + width * height * 8 + legacy_capacity * 77 + 8>;
+using AdaptiveCheckpoint = std::array<std::uint8_t, 6 + 128 + 15 * 8 + width * height * 8 + legacy_capacity * 95 + 8>;
+using HuntTuningCheckpoint = std::array<std::uint8_t, 6 + 130 + 15 * 8 + width * height * 8 + legacy_capacity * 95 + 8>;
+using KinAvoidanceCheckpoint = std::array<std::uint8_t, 6 + 131 + 15 * 8 + width * height * 8 + legacy_capacity * 96 + 8>;
+using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * height * 8 + legacy_capacity * 96 + 8>;
+using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + legacy_capacity * 97 + 8>;
+using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
+using WeatherCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
+// Version 16: 320 slots with 32-bit IDs and lifetime counters.
+inline constexpr std::size_t checkpoint_creature_bytes = 59;
+using Checkpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 +
+                                            capacity * checkpoint_creature_bytes + 8>;
+// The SAMD51 keeps checkpoints in 96 KiB QSPI slots whose data starts at byte 256.
+static_assert(std::tuple_size<Checkpoint>::value <= 96 * 1024 - 256);
 
 enum class Biome : std::uint8_t { scrub, grassland, wetland };
 
@@ -63,32 +71,52 @@ static_assert(sizeof(Cell) == 6);
 using CreatureId = std::uint32_t;
 inline constexpr std::uint64_t max_creature_id = 0xffffffffu;
 
-// One byte per cell: the occupying creature slot, or -1 when the cell is vacant.
+// Nine bits per cell: the occupying creature slot, or -1 when the cell is vacant.
+// The low eight bits take a byte per cell and the ninth is packed eight cells
+// to a byte, so 320 slots cost 1.125 bytes per cell rather than 2.
 class OccupancyGrid {
 public:
-    static constexpr std::uint8_t vacant = 0xff;
+    static constexpr unsigned vacant = 0x1ff;
 
     class Ref {
     public:
-        operator int() const { return byte_ == vacant ? -1 : byte_; }
+        operator int() const { return grid_.get(cell_); }
         Ref& operator=(int slot) {
-            byte_ = slot < 0 ? vacant : static_cast<std::uint8_t>(slot);
+            grid_.set(cell_, slot);
             return *this;
         }
         Ref& operator=(const Ref& other) { return *this = int(other); }
 
     private:
         friend class OccupancyGrid;
-        explicit Ref(std::uint8_t& byte) : byte_(byte) {}
-        std::uint8_t& byte_;
+        Ref(OccupancyGrid& grid, std::size_t cell) : grid_(grid), cell_(cell) {}
+        OccupancyGrid& grid_;
+        std::size_t cell_;
     };
 
-    Ref operator[](std::size_t cell) { return Ref(slots_[cell]); }
-    int operator[](std::size_t cell) const { return slots_[cell] == vacant ? -1 : slots_[cell]; }
-    void fill(int slot) { slots_.fill(slot < 0 ? vacant : static_cast<std::uint8_t>(slot)); }
+    Ref operator[](std::size_t cell) { return Ref(*this, cell); }
+    int operator[](std::size_t cell) const { return get(cell); }
+    void fill(int slot) {
+        const unsigned value = slot < 0 ? vacant : unsigned(slot);
+        low_.fill(static_cast<std::uint8_t>(value));
+        high_.fill(value & 0x100 ? 0xff : 0);
+    }
 
 private:
-    std::array<std::uint8_t, width * height> slots_{};
+    int get(std::size_t cell) const {
+        const unsigned value = low_[cell] | ((high_[cell / 8] >> (cell % 8)) & 1u) << 8;
+        return value == vacant ? -1 : int(value);
+    }
+    void set(std::size_t cell, int slot) {
+        const unsigned value = slot < 0 ? vacant : unsigned(slot);
+        low_[cell] = static_cast<std::uint8_t>(value);
+        auto& bits = high_[cell / 8];
+        const unsigned bit = 1u << (cell % 8);
+        bits = static_cast<std::uint8_t>(value & 0x100 ? bits | bit : bits & ~bit);
+    }
+
+    std::array<std::uint8_t, width * height> low_{};
+    std::array<std::uint8_t, width * height / 8> high_{};
 };
 static_assert(capacity < OccupancyGrid::vacant);
 
@@ -324,6 +352,7 @@ public:
     bool load_checkpoint(const KinTuningCheckpoint& checkpoint);
     bool load_checkpoint(const FactionCheckpoint& checkpoint);
     bool load_checkpoint(const FloraCheckpoint& checkpoint);
+    bool load_checkpoint(const WeatherCheckpoint& checkpoint);
 
 private:
     World() = default;

@@ -66,9 +66,10 @@ checkpoint = Path(sys.argv[1]).read_bytes()
 checkpoint_types = {4: "FoodWebCheckpoint", 5: "ConnectedCheckpoint", 6: "IrregularCheckpoint",
                     7: "SexualCheckpoint", 8: "NestCheckpoint", 9: "AdaptiveCheckpoint",
                     10: "HuntTuningCheckpoint", 11: "KinAvoidanceCheckpoint", 12: "KinTuningCheckpoint",
-                    13: "FactionCheckpoint", 14: "FloraCheckpoint", 15: "Checkpoint"}
+                    13: "FactionCheckpoint", 14: "FloraCheckpoint", 15: "WeatherCheckpoint",
+                    16: "Checkpoint"}
 if checkpoint[:5] != b"PETRI" or len(checkpoint) < 6 or checkpoint[5] not in checkpoint_types:
-    raise SystemExit("The demo requires a Petri checkpoint from versions 4 through 15")
+    raise SystemExit("The demo requires a Petri checkpoint from versions 4 through 16")
 with Path(sys.argv[2]).open("w") as header:
     checkpoint_type = checkpoint_types[checkpoint[5]]
     header.write(f"static constexpr petri::{checkpoint_type} demoCheckpoint{{{{\n")

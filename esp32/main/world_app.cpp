@@ -51,6 +51,9 @@ constexpr std::int64_t min_update_us = 30000, paused_update_us = 1000000, teleme
 // How long to wait for the boot handshake before starting fresh, unless a restore is under way.
 constexpr std::int64_t boot_wait_us = 5000000, boot_wait_limit_us = 30000000;
 constexpr std::size_t checkpoint_size = std::tuple_size<Checkpoint>::value;
+constexpr std::size_t census_messages = (capacity + link::census_slots_per_message - 1) / link::census_slots_per_message;
+static_assert(payloads_per_update + 1 + census_messages <= pool_size);
+static_assert(link::census_header_bytes + link::census_slots_per_message * link::census_entry_bytes <= link::payload_max);
 
 enum Boot : int { waiting, fresh, restore };
 std::atomic<int> boot_decision{waiting};
@@ -155,7 +158,7 @@ void send_telemetry(const SimStats& stats, std::uint32_t ticks_per_second_measur
 }
 
 void send_census() {
-    // Two messages cover all 160 slots; the observatory shows these details.
+    // Three messages cover all 320 slots; the observatory shows these details.
     static link::CensusEntry entries[link::census_slots_per_message];
     for (std::size_t first = 0; first < capacity; first += link::census_slots_per_message) {
         auto* out = take_free();
@@ -175,7 +178,7 @@ void send_census() {
         }
         out->type = link::Type::census;
         out->size = static_cast<std::uint16_t>(
-            link::write_census(entries, static_cast<std::uint8_t>(first), static_cast<std::uint8_t>(count), out->data));
+            link::write_census(entries, static_cast<std::uint16_t>(first), static_cast<std::uint8_t>(count), out->data));
         xQueueSend(send_queue, &out, portMAX_DELAY);
     }
 }
@@ -310,8 +313,8 @@ void sim_task(void*) {
         }
 
         const bool due = stepped ? now - last_update >= min_update_us : now - last_update >= paused_update_us;
-        // Keep three buffers for telemetry and the census.
-        if (due && uxQueueMessagesWaiting(free_queue) >= payloads_per_update + 3) {
+        // Keep buffers for telemetry and the census.
+        if (due && uxQueueMessagesWaiting(free_queue) >= payloads_per_update + 1 + census_messages) {
             const auto started = esp_timer_get_time();
             const auto sent = encoder->encode(*world, *events, payloads_per_update, send_payload, nullptr);
             const auto elapsed = static_cast<std::uint32_t>(esp_timer_get_time() - started);

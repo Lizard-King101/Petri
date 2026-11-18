@@ -123,14 +123,21 @@ Implemented natively in stage 6 (`render/render_state.hpp`,
   differs in 0.15–0.57% of pixels, at most 38 of 2,048 per frame, all from the
   life view's 2×2 moisture average and the soil tint.
 - **Creatures carry phenotype.** `Look` packs diet shape, body color,
-  detail-sprite back height, and faction into 16 bits, and `look_of(Genome)`
-  computes it. A creature record is slot, id, cell, and look: 9 bytes.
+  detail-sprite back height, and faction into 32 bits, and `look_of(Genome)`
+  computes it; `render/render_state.hpp` documents the bit layout. A creature
+  entry is slot (u16), id, cell, and look: 12 bytes.
 - **Events** are hunts (with the prey cell's wetness), meals, attacks, and
-  deaths. They are recorded during `World::step` in order, 18 bytes each.
+  deaths. They are recorded during `World::step` in order, 22 bytes each.
 - **The stream.** Each update is a sequence of records in payloads of up to
   4,096 bytes, and no record spans two payloads:
   - an update header;
-  - the complete creature list;
+  - the complete creature list, as records that each cover a range of slots
+    and list the living creatures in it (at most 255 per record). The ranges
+    cover all 320 slots once per update. A lost record leaves only its range
+    as of an earlier update, and the decoder counts the update in
+    `creature_gaps` rather than as complete. Even with every slot alive the
+    list fits the first payload beside the update and end records (3,879
+    bytes), so a one-payload budget still sends it whole;
   - the events;
   - runs of changed cells, merging single unchanged cells;
   - a rolling refresh of 128 cells;
@@ -138,13 +145,15 @@ Implemented natively in stage 6 (`render/render_state.hpp`,
   The encoder keeps a 24 KB shadow and computes cells on the fly. Cells that
   do not fit the payload budget stay pending. The decoder rejects malformed
   records and counts checksum mismatches.
-- **Measured** on the observatory world, 300 updates each:
+- **Measured** on the observatory world, 300 updates each, with 32-bit looks
+  and 16-bit slots (the 16-bit format's figures were 3,634, 8,668, and 12,068
+  mean bytes):
 
   | Ticks per update | Mean bytes | Max bytes | At 20 updates/s |
   | ---: | ---: | ---: | ---: |
-  | 1 | 3,634 | 4,775 | 73 KB/s, 10% of the link |
-  | 4 | 8,668 | 9,577 | 173 KB/s, 24% |
-  | 12 | 12,068 | 13,177 | 241 KB/s, 33% |
+  | 1 | 3,893 | 5,195 | 78 KB/s, 11% of the link |
+  | 4 | 9,304 | 10,300 | 186 KB/s, 26% |
+  | 12 | 12,705 | 13,837 | 254 KB/s, 35% |
 
 - **Verified** by `tests/render_stream_test.cpp` in both world sizes:
   - Without loss, the mirror equals the world's render state after every
@@ -155,6 +164,11 @@ Implemented natively in stage 6 (`render/render_state.hpp`,
   - With every third payload dropped, the checksum flagged damage, and one
     refresh cycle (65 updates) repaired the mirror.
   - Truncated, unknown, and random payloads are rejected without crashing.
+  - A synthetic state with all 320 slots alive and looks using all 32 bits
+    round-trips in one payload as two creature records. Losing the second
+    record leaves slots 255–319 as they were and flags the update, and the
+    next update repairs them. Creature records with out-of-order slots,
+    slots outside their range, or a range past 320 are rejected.
 - **SAMD51-only firmware.** The board runs the LocalPanel build
   (`petri-observatory-mirror.uf2`). Static RAM is 132,888 bytes, up 28 KB for
   the mirror and event log. 50,828 bytes remain free between heap and stack
@@ -299,7 +313,8 @@ Each stage ends with something measured on hardware or checked by a test.
    - `esp32` built with `sdkconfig.defaults.world` runs the observatory world
      on core 1. Between steps it encodes render updates, at most one per
      30 ms plus one per second while paused. It sends telemetry and a creature
-     census once a second. Core 0 runs the SPI slave and applies speed
+     census once a second (three messages of up to 128 slots, each with a
+     16-bit first slot). Core 0 runs the SPI slave and applies speed
      commands.
    - `firmware/petri_display` (`--display`) is the SAMD51 half. It holds no
      `World`: only the mirror, the `Panel`, the census details, and the
@@ -371,9 +386,10 @@ Each stage ends with something measured on hardware or checked by a test.
    procedural sprites per zoom level.
 9. **BLE.** Add the GATT control and telemetry service, bonding, and the
    phone app.
-10. **Ecology.** Make the full-grid environment passes cheaper; `recycle` runs
-    on about 4,096 cells each tick. Try a deterministic share of them on
-    core 0. Then add evolvable fixed-topology int8 neural controllers, costed
+10. **Ecology.** Exact early-outs in `recycle` and `grow_plants` made the
+    native observatory world 8% faster and the default 128×64 world 92%
+    faster (README, Environment early-outs). A deterministic share of the
+    cells could still move to core 0. Then add evolvable fixed-topology int8 neural controllers, costed
     body traits, plant genetics, dormant eggs, and compatibility-based
     speciation.
 

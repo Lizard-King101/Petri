@@ -25,8 +25,9 @@ std::size_t capture_observation(const World& world, const LocalPanel& panel, std
 // The same observation from a render mirror, for a renderer without the World.
 // `details` holds the per-slot facts the mirror leaves out; a slot whose id does
 // not match the mirror's creature is reported with zero details.
+// Fields are 32 bits, as in World and the census; the observation widens them.
 struct CreatureDetails {
-    std::uint64_t id = 0, parent = 0, founder = 0, plants_eaten = 0, animal_eaten = 0;
+    std::uint32_t id = 0, parent = 0, founder = 0, plants_eaten = 0, animal_eaten = 0;
     std::uint32_t generation = 0;
     std::uint16_t energy = 0;
     std::uint8_t digestion = 0, thrift = 0, moisture_preference = 0;

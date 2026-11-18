@@ -91,6 +91,10 @@ bool read_checkpoint(const char* path, petri::World& world) {
         petri::FloraCheckpoint data;
         return read(data);
     }
+    if (length == petri::WeatherCheckpoint{}.size()) {
+        petri::WeatherCheckpoint data;
+        return read(data);
+    }
     petri::Checkpoint data;
     return length == data.size() && read(data);
 }

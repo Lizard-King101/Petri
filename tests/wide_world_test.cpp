@@ -1,3 +1,4 @@
+#include "checkpoint_compat.hpp"
 #include "observation.hpp"
 #include "terrain.hpp"
 
@@ -575,8 +576,31 @@ void check_attack_presentation() {
 
 } // namespace
 
+void check_older_checkpoint() {
+    // The observatory world saved as version 15 (160 slots, 64-bit fields) resumes exactly.
+    auto original = std::make_unique<petri::World>(14, petri::observatory_config());
+    for (int tick = 0; tick < 1500; ++tick) {
+        original->step();
+    }
+    auto current = std::make_unique<petri::Checkpoint>();
+    original->save_checkpoint(*current);
+    const auto old = petri::compat::to_version15(*current);
+    check(old != nullptr, "The observatory test world used a slot past 160");
+    auto restored = std::make_unique<petri::World>(1);
+    check(restored->load_checkpoint(*old), "A version 15 observatory checkpoint was rejected");
+    auto again = std::make_unique<petri::Checkpoint>();
+    restored->save_checkpoint(*again);
+    check(*again == *current, "A version 15 observatory checkpoint did not re-save identically");
+    for (int tick = 0; tick < 500; ++tick) {
+        original->step();
+        restored->step();
+    }
+    check(restored->fingerprint() == original->fingerprint(), "An observatory run resumed from version 15 diverged");
+}
+
 int main() {
     check_wide_world();
+    check_older_checkpoint();
     check_connected_biomes();
     check_motion();
     check_panel_camera();

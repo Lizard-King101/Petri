@@ -1,3 +1,4 @@
+#include "checkpoint_compat.hpp"
 #include "life.hpp"
 #include "world.hpp"
 
@@ -694,6 +695,37 @@ void checkpoint_replay() {
     }
 }
 
+void older_checkpoints_load() {
+    // A version 15 checkpoint has 160 slots and 64-bit fields. It loads into the
+    // first 160 slots and resumes exactly.
+    const auto config = petri::Config{80, true, 1, 0, true, true, false, false, true, true, true, true,
+                                      true, false, {42, 1}, true, {2, 14, true}, false, true, false, true};
+    petri::World original(42, config);
+    for (int tick = 0; tick < 1500; ++tick) {
+        original.step();
+    }
+    petri::Checkpoint current{};
+    original.save_checkpoint(current);
+    const auto old = petri::compat::to_version15(current);
+    check(old != nullptr, "The test world used a slot past version 15's 160");
+    petri::World restored(1);
+    check(restored.load_checkpoint(*old), "A version 15 checkpoint was rejected");
+    check(restored.fingerprint() == original.fingerprint(), "A version 15 checkpoint restored a different world");
+    petri::Checkpoint again{};
+    restored.save_checkpoint(again);
+    check(again == current, "A version 15 checkpoint did not re-save as the same version 16 bytes");
+    for (int tick = 0; tick < 500; ++tick) {
+        original.step();
+        restored.step();
+    }
+    check(restored.fingerprint() == original.fingerprint(), "A run resumed from version 15 diverged");
+
+    auto damaged = *old;
+    damaged[5] = 16;
+    petri::compat::seal(damaged);
+    check(!restored.load_checkpoint(damaged), "A version 15 layout was accepted as version 16");
+}
+
 void reseal(petri::Checkpoint& bytes) {
     std::uint64_t hash = 14695981039346656037ull;
     for (std::size_t index = 0; index + 8 < bytes.size(); ++index) {
@@ -879,6 +911,7 @@ int main() {
     kin_relationships();
     fruiting_plants();
     checkpoint_replay();
+    older_checkpoints_load();
     detritus_limit();
     checkpoint_streams();
     selection_scenarios();

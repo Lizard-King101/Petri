@@ -120,16 +120,16 @@ std::size_t capture_observation(const RenderState& state, const std::array<Creat
         }
         const auto& facts = details[slot].id == creature.id ? details[slot] : CreatureDetails{};
         writer.put(std::uint64_t(creature.id));
-        writer.put(facts.parent);
-        writer.put(facts.founder);
+        writer.put(std::uint64_t(facts.parent));
+        writer.put(std::uint64_t(facts.founder));
         writer.put(facts.generation);
         writer.put(creature.cell);
         writer.put(facts.energy);
         writer.put(facts.digestion);
         writer.put(facts.thrift);
         writer.put(facts.moisture_preference);
-        writer.put(facts.plants_eaten);
-        writer.put(facts.animal_eaten);
+        writer.put(std::uint64_t(facts.plants_eaten));
+        writer.put(std::uint64_t(facts.animal_eaten));
         const auto point = panel.location(slot);
         writer.put(point.x);
         writer.put(point.y);

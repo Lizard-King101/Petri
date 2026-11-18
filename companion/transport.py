@@ -25,7 +25,9 @@ HEADER = struct.Struct("<HHHQQQQBBHHQIB")
 LEGACY_CREATURE = struct.Struct("<QQQIHHBBBQQbb")
 CREATURE = struct.Struct("<QQQIHHBBBQQbbB")
 U32 = struct.Struct("<I")
-MAX_BODY = HEADER.size + PANEL_BYTES + 160 * CREATURE.size
+# Creature slots in the world (petri::capacity).
+MAX_CREATURES = 320
+MAX_BODY = HEADER.size + PANEL_BYTES + MAX_CREATURES * CREATURE.size
 
 
 class View(IntEnum):
@@ -136,7 +138,7 @@ class Parser:
         width, height, count, tick, births, deaths, kills, view, zoom, left, top, follow, revision = (
             fields[:13])
         max_zoom = SPRITE_ZOOM if version == 2 else DETAIL_ZOOM
-        if (width, height) not in ((64, 32), (128, 64)) or count > 160 or view > 3 or zoom > max_zoom:
+        if (width, height) not in ((64, 32), (128, 64)) or count > MAX_CREATURES or view > 3 or zoom > max_zoom:
             return None
         offset = header.size + PANEL_BYTES
         record = LEGACY_CREATURE if version == 2 else CREATURE

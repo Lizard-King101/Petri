@@ -113,11 +113,12 @@ int main() {
         census[i] = {std::uint32_t(1000 + i), 7, std::uint32_t(i), 900000, 12, 150, 3, 9, 11, 4};
     }
     std::uint8_t census_bytes[payload_max];
-    const auto census_size = write_census(census, 80, census_slots_per_message, census_bytes);
+    // A first slot past 255 needs the 16-bit field.
+    const auto census_size = write_census(census, 300, census_slots_per_message, census_bytes);
     check(census_size <= payload_max, "A census message does not fit a payload");
     std::size_t visited = 0;
     check(read_census(census_bytes, census_size, [&](std::size_t slot, const CensusEntry& e) {
-              check(slot == 80 + visited && e.id == 1000 + visited && e.generation == visited &&
+              check(slot == 300 + visited && e.id == 1000 + visited && e.generation == visited &&
                         e.plants_eaten == 900000 && e.energy == 150 && e.founder == 3 && e.moisture_preference == 4,
                     "A census entry changed in transit");
               ++visited;
