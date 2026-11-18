@@ -1,6 +1,6 @@
 # Petri dual-processor architecture
 
-**Status:** Design decision, November 18, 2026. Stages 1 and 2 are done;
+**Status:** Design decision, November 18, 2026. Stages 1 through 4 are done;
 the rest is not implemented yet. Values marked *verify* are unconfirmed on
 this board.
 
@@ -17,7 +17,7 @@ SAMD51-only firmware stays buildable as a fallback.
 | --- | --- | --- |
 | Chip | ATSAMD51J19A | ESP32-D0WD-V3, revision v3.0, 40 MHz crystal (read with esptool) |
 | CPU | 1× Cortex-M4F, 120 MHz, DSP MAC instructions | 2× Xtensa LX6, up to 240 MHz |
-| RAM | 192 KiB | 520 KiB on chip; roughly 250 KiB usable with Wi-Fi, fragmented across regions (*verify*) |
+| RAM | 192 KiB | 520 KiB on chip. Measured: 217,824 bytes of byte-addressable heap free at boot without a radio, or 121,788 with NimBLE advertising. The largest block was 110,592 bytes. Static DRAM has 180,736 bytes without Bluetooth and 124,580 with it |
 | Flash | 512 KiB internal + 2 MiB QSPI | 4 MiB, 3.3 V (read with esptool) |
 | PSRAM | None | The D0WD-V3 has none built in. esptool cannot detect external PSRAM, which WROOM modules lack |
 | Shipped firmware | UF2 bootloader 3.16.0 | Adafruit nina-fw 1.2.2, backed up privately in `backups/` |
@@ -156,9 +156,25 @@ Each stage ends with something measured on hardware or checked by a test.
    to the ESP32 UART and maps DTR and RTS to GPIO0 and reset. Tested on the
    board with esptool's default reset and 1 MiB reads at 460800 baud. This
    removes the UF2 swap from every ESP32 flash.
-4. **Core port.** Build `core/` and `render/` with ESP-IDF. Match the native
-   fingerprint on the device, and measure ticks per second, free heap, and the
-   largest free block with no radio and with NimBLE advertising.
+4. **Core port.** *Done.* `esp32/` builds the core and renderer with ESP-IDF
+   v5.5.6 and runs `esp32/selftest` on core 1. All 16 fingerprints matched
+   native, with and without NimBLE. The same self-test also matched on the
+   SAMD51. The README records the timing and heap tables. Findings:
+   - The observatory world runs at about 242 ticks/s on one ESP32 core and
+     103 ticks/s on the SAMD51, a 2.35× gain per core. That is 3× the
+     panel's 80 ticks/s maximum. Running the core from IRAM did not help.
+     The workload is compute-bound, split between full-grid environment
+     passes and creature updates.
+   - NimBLE advertising costs about 96 KB of byte-addressable heap and 47 KB
+     of IRAM heap. With it, about 105 KB of heap remained beside the static
+     72.7 KB world. That is close to the SAMD51's budget today, so the
+     dual-processor gain is CPU time and BLE, not memory. Tuning NimBLE
+     buffers is worth trying before the BLE stage.
+   - `World::load_checkpoint` decodes into a full `World` copy on the stack.
+     That will overflow an ESP32 task stack, so persistence work must decode
+     in place.
+   - The ESP32 now holds the self-test app instead of nina-fw. The Petri
+     firmware does not use the ESP32 yet.
 5. **Link.** Bring up SPI master and slave with the handshake, checksums,
    and reset recovery. Measure throughput and error rate under load.
 6. **Cutover.** Make the ESP32 world authoritative, display streamed frames,

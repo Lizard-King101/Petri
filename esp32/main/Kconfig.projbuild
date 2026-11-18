@@ -1,0 +1,11 @@
+menu "Petri"
+
+config PETRI_BLE_ADVERTISE
+    bool "Advertise over Bluetooth LE with NimBLE during the self-test"
+    depends on BT_NIMBLE_ENABLED
+    default n
+    help
+        Starts NimBLE and advertises as "Petri" before the self-test so the
+        heap and timing results include the radio stack.
+
+endmenu

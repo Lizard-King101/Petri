@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
-    echo "Usage: $0 /path/to/uf2conv.py [output.uf2] [checkpoint.petri|--wide|--connected|--observatory]" >&2
+    echo "Usage: $0 /path/to/uf2conv.py [output.uf2] [checkpoint.petri|--wide|--connected|--observatory|--selftest]" >&2
     exit 2
 fi
 
@@ -11,9 +11,17 @@ output=${2:-"$repo/build/petri-matrixportal-m4.uf2"}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-sketch="$stage/petri_matrix"
-mkdir -p "$sketch/src" "$(dirname -- "$output")"
-cp "$repo/firmware/petri_matrix/petri_matrix.ino" "$sketch/"
+if [ "${3:-}" = --selftest ]; then
+    sketch="$stage/selftest"
+    mkdir -p "$sketch/src" "$(dirname -- "$output")"
+    cp "$repo/firmware/selftest/selftest.ino" "$sketch/"
+    cp "$repo/esp32/selftest/selftest.cpp" "$repo/esp32/selftest/selftest.hpp" "$repo/core/checkpoint.cpp" \
+        "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
+else
+    sketch="$stage/petri_matrix"
+    mkdir -p "$sketch/src" "$(dirname -- "$output")"
+    cp "$repo/firmware/petri_matrix/petri_matrix.ino" "$sketch/"
+fi
 cp "$repo/core/world.cpp" "$repo/core/world.hpp" "$repo/core/nests.cpp" "$repo/core/hunting.cpp" "$repo/render/life.cpp" "$repo/render/life.hpp" "$sketch/src/"
 cp "$repo/render/panel.cpp" "$repo/render/panel.hpp" "$repo/render/terrain.hpp" "$sketch/src/"
 cp "$repo/firmware/esp32_passthrough/esp32_bridge.hpp" "$sketch/src/"
@@ -23,6 +31,8 @@ if [ "${3:-}" = --wide ]; then
     cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1"
 elif [ "${3:-}" = --connected ]; then
     cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1 -DPETRI_CONNECTED_BIOMES=1"
+elif [ "${3:-}" = --selftest ]; then
+    cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1"
 elif [ "${3:-}" = --observatory ]; then
     cp "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
     cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1 -DPETRI_CONNECTED_BIOMES=1 -DPETRI_OBSERVATORY=1"
@@ -54,5 +64,5 @@ fi
 arduino-cli compile --fqbn adafruit:samd:adafruit_matrixportal_m4:usbstack=tinyusb \
     --build-property "compiler.cpp.extra_flags=$cpp_flags" --output-dir "$stage/output" "$sketch"
 python3 "$1" -c -b 0x4000 -f SAMD51 \
-    -o "$stage/petri-matrixportal-m4.uf2" "$stage/output/petri_matrix.ino.bin"
+    -o "$stage/petri-matrixportal-m4.uf2" "$stage/output/$(basename -- "$sketch").ino.bin"
 install -m 644 "$stage/petri-matrixportal-m4.uf2" "$output"

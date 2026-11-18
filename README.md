@@ -832,6 +832,72 @@ echo 'SUBSYSTEMS=="usb", ATTRS{idVendor}=="239a", TAG+="uaccess"' | sudo tee /et
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
+### ESP32 core self-test
+
+`esp32/` is an ESP-IDF 5.5 project that runs the portable self-test in
+`esp32/selftest` on ESP32 core 1. The self-test runs four 128×64
+configurations to tick 10,000 and prints a fingerprint line at ticks 1, 256,
+2,000, and 10,000. Every fingerprint must match the native build. It also
+times steps from tick 2,000 to 10,000 and renders each panel view. The same
+source runs natively and on the SAMD51 (`--selftest` in the UF2 build script).
+
+Flash it through either bridge. This replaces the ESP32's nina-fw. The
+restore steps are in `backups/`.
+
+```sh
+. ~/esp/esp-idf-v5.5.6/export.sh
+cd esp32
+idf.py set-target esp32
+idf.py build
+idf.py -p /dev/ttyACM0 -b 460800 flash
+```
+
+For the Bluetooth LE measurement, layer the NimBLE defaults into a
+separate build directory:
+
+```sh
+idf.py -B build-ble -DSDKCONFIG=build-ble/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ble" build
+```
+
+The system Python here is 3.14, which ESP-IDF 5.5 may not support. This
+machine runs `install.sh` and `export.sh` with a `uv`-managed Python 3.12
+first on `PATH`.
+
+On November 18, 2026, all 16 fingerprints matched the native build on the
+ESP32, both with and without NimBLE, and on the SAMD51. Step timings cover
+ticks 2,000 to 10,000 on one core:
+
+| Case | Native (x86) | ESP32 core 1, 240 MHz | SAMD51, 120 MHz |
+| --- | ---: | ---: | ---: |
+| Plant-only world, seed 42 | 94,334 ticks/s | 788 ticks/s | 283 ticks/s |
+| Food web, seed 4 | 50,156 | 460 | 172 |
+| Every ecology feature, seed 14 | 28,274 | 251–276 | 118 |
+| Observatory world, seed 14 | 24,428 | 242–247 | 103 |
+| Close view frame | 57 µs | 4.5 ms | 10.5 ms |
+| Life view frame | 8 µs | 1.2 ms | 2.4 ms |
+
+On the ESP32, the observatory world's mean step was about 4.1 ms, with a
+99th percentile of 5.7 ms. Running the core from IRAM instead of the flash
+cache changed the rate by under 2%. A native profile splits the cost about
+evenly between per-cell environment updates and creature updates.
+`World::recycle` alone runs on about 4,096 cells each tick.
+
+| ESP32 heap, bytes | No radio | NimBLE advertising |
+| --- | ---: | ---: |
+| Byte-addressable free at boot | 217,824 | 160,456 |
+| Byte-addressable free with BLE up | — | 121,788 |
+| Lowest byte-addressable free | 201,080 | 105,024 |
+| Largest byte-addressable block | 110,592 | 94,208 after the run |
+| 32-bit-only (IRAM) heap free | 81,212 | 34,152 |
+| Static DRAM used of segment | 94,180 of 180,736 | 107,368 of 124,580 |
+
+Static DRAM includes the 72,664-byte world and the 7,760-byte panel
+renderer. Bluetooth reserves about 56 KB of the static DRAM segment for its
+controller. NimBLE advertising used about 96 KB of byte-addressable heap and
+47 KB of IRAM heap. Simulation timing did not change, because NimBLE runs on
+core 0.
+
 ### Panel and button test
 
 Copy `build/petri-panel-test.uf2` to MATRIXBOOT. After the board restarts, the
