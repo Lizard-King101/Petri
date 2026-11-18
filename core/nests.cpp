@@ -124,7 +124,8 @@ void World::deliver_food(Creature& adult, Creature& young, StepObserver observer
 
 void World::feed_young(Creature& young, Food food, int amount, StepObserver observer) {
     // Young can eat small amounts as long as the food reaches the nest.
-    young.energy = std::min(160, young.energy + amount * (food == Food::foliage ? 2 : 3));
+    young.energy = static_cast<std::uint16_t>(
+        std::min(max_energy(young), young.energy + amount * (food == Food::foliage ? 2 : 3)));
     const int retained = std::min(amount / 2, body_mass - young.nutrients_carried);
     young.nutrients_carried += retained;
     add_detritus(cells_[young.cell], amount - retained);

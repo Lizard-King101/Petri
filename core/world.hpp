@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +17,10 @@ inline constexpr int width = 64;
 inline constexpr int height = 32;
 inline constexpr bool wide_world = false;
 #endif
-inline constexpr int capacity = 160;
+inline constexpr int capacity = 320;
+// Checkpoint versions 1-16 stored 160 creature slots. Version 16 is reserved for
+// storm fronts, which are developed on another branch; this build cannot load it.
+inline constexpr int legacy_capacity = 160;
 inline constexpr int founder_count = 32;
 inline constexpr int faction_count = 4;
 inline constexpr int body_mass = 8;
@@ -29,25 +33,34 @@ inline constexpr int rainfall_limit = 80;
 inline constexpr int storm_slots = 4;
 
 // Header, metadata, cells, creature slots, and a checksum.
-using LegacyCheckpoint = std::array<std::uint8_t, 6 + 37 + width * height * 4 + capacity * 34 + 8>;
-using ScavengingCheckpoint = std::array<std::uint8_t, 6 + 54 + width * height * 8 + capacity * 50 + 8>;
-using PredationCheckpoint = std::array<std::uint8_t, 6 + 71 + width * height * 8 + capacity * 50 + 8>;
-using FoodWebCheckpoint = std::array<std::uint8_t, 6 + 72 + width * height * 8 + capacity * 51 + 8>;
-using ConnectedCheckpoint = std::array<std::uint8_t, 6 + 121 + width * height * 8 + capacity * 53 + 8>;
-using IrregularCheckpoint = std::array<std::uint8_t, 6 + 122 + width * height * 8 + capacity * 53 + 8>;
-using SexualCheckpoint = std::array<std::uint8_t, 6 + 123 + width * height * 8 + capacity * 64 + 8>;
-using NestCheckpoint = std::array<std::uint8_t, 6 + 126 + 15 * 8 + width * height * 8 + capacity * 77 + 8>;
-using AdaptiveCheckpoint = std::array<std::uint8_t, 6 + 128 + 15 * 8 + width * height * 8 + capacity * 95 + 8>;
-using HuntTuningCheckpoint = std::array<std::uint8_t, 6 + 130 + 15 * 8 + width * height * 8 + capacity * 95 + 8>;
-using KinAvoidanceCheckpoint = std::array<std::uint8_t, 6 + 131 + 15 * 8 + width * height * 8 + capacity * 96 + 8>;
-using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * height * 8 + capacity * 96 + 8>;
-using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + capacity * 97 + 8>;
-using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
-using ClimateCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
+using LegacyCheckpoint = std::array<std::uint8_t, 6 + 37 + width * height * 4 + legacy_capacity * 34 + 8>;
+using ScavengingCheckpoint = std::array<std::uint8_t, 6 + 54 + width * height * 8 + legacy_capacity * 50 + 8>;
+using PredationCheckpoint = std::array<std::uint8_t, 6 + 71 + width * height * 8 + legacy_capacity * 50 + 8>;
+using FoodWebCheckpoint = std::array<std::uint8_t, 6 + 72 + width * height * 8 + legacy_capacity * 51 + 8>;
+using ConnectedCheckpoint = std::array<std::uint8_t, 6 + 121 + width * height * 8 + legacy_capacity * 53 + 8>;
+using IrregularCheckpoint = std::array<std::uint8_t, 6 + 122 + width * height * 8 + legacy_capacity * 53 + 8>;
+using SexualCheckpoint = std::array<std::uint8_t, 6 + 123 + width * height * 8 + legacy_capacity * 64 + 8>;
+using NestCheckpoint = std::array<std::uint8_t, 6 + 126 + 15 * 8 + width * height * 8 + legacy_capacity * 77 + 8>;
+using AdaptiveCheckpoint = std::array<std::uint8_t, 6 + 128 + 15 * 8 + width * height * 8 + legacy_capacity * 95 + 8>;
+using HuntTuningCheckpoint = std::array<std::uint8_t, 6 + 130 + 15 * 8 + width * height * 8 + legacy_capacity * 95 + 8>;
+using KinAvoidanceCheckpoint = std::array<std::uint8_t, 6 + 131 + 15 * 8 + width * height * 8 + legacy_capacity * 96 + 8>;
+using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * height * 8 + legacy_capacity * 96 + 8>;
+using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + legacy_capacity * 97 + 8>;
+using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
+using ClimateCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
 // Version 16 adds the storm-front flag, the storms, and the soil water at each climate node.
 inline constexpr std::size_t storm_bytes = 4 + 4 + 2 + 2 + 1 + 1;
-using Checkpoint = std::array<std::uint8_t, std::tuple_size<ClimateCheckpoint>::value + 1 + storm_slots * storm_bytes +
-                                               climate_nodes * 4>;
+inline constexpr std::size_t storm_state_bytes = 1 + storm_slots * storm_bytes + climate_nodes * 4;
+using StormCheckpoint = std::array<std::uint8_t, std::tuple_size<ClimateCheckpoint>::value + storm_state_bytes>;
+// Version 17: 320 slots with 32-bit IDs and lifetime counters.
+using CapacityCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + storm_state_bytes + 15 * 8 +
+                                                    width * height * 9 + capacity * 59 + 8>;
+// Version 18 adds the morphology settings and four morphology genes per slot.
+inline constexpr std::size_t checkpoint_creature_bytes = 63;
+using Checkpoint = std::array<std::uint8_t, 6 + 153 + climate_nodes + storm_state_bytes + 15 * 8 + width * height * 9 +
+                                            capacity * checkpoint_creature_bytes + 8>;
+// The SAMD51 keeps checkpoints in 96 KiB QSPI slots whose data starts at byte 256.
+static_assert(std::tuple_size<Checkpoint>::value <= 96 * 1024 - 256);
 
 enum class Biome : std::uint8_t { scrub, grassland, wetland };
 
@@ -73,6 +86,11 @@ constexpr Biome biome_at(unsigned moisture) {
     return moisture >= 128 ? Biome::wetland : moisture >= 56 ? Biome::grassland : Biome::scrub;
 }
 
+// A cell's background on the pigment gene's scale: 0 for the driest ground, 15 for the wettest.
+constexpr int background_tone(unsigned moisture) {
+    return static_cast<int>(moisture * 15 / 255);
+}
+
 struct Cell {
     // Measured peaks stay below 8,200. Deposits past the limit are clipped and counted in Metrics.
     static constexpr std::uint16_t max_detritus = 0xffff;
@@ -86,32 +104,52 @@ static_assert(sizeof(Cell) == 6);
 using CreatureId = std::uint32_t;
 inline constexpr std::uint64_t max_creature_id = 0xffffffffu;
 
-// One byte per cell: the occupying creature slot, or -1 when the cell is vacant.
+// Nine bits per cell: the occupying creature slot, or -1 when the cell is vacant.
+// The low eight bits take a byte per cell and the ninth is packed eight cells
+// to a byte, so 320 slots cost 1.125 bytes per cell rather than 2.
 class OccupancyGrid {
 public:
-    static constexpr std::uint8_t vacant = 0xff;
+    static constexpr unsigned vacant = 0x1ff;
 
     class Ref {
     public:
-        operator int() const { return byte_ == vacant ? -1 : byte_; }
+        operator int() const { return grid_.get(cell_); }
         Ref& operator=(int slot) {
-            byte_ = slot < 0 ? vacant : static_cast<std::uint8_t>(slot);
+            grid_.set(cell_, slot);
             return *this;
         }
         Ref& operator=(const Ref& other) { return *this = int(other); }
 
     private:
         friend class OccupancyGrid;
-        explicit Ref(std::uint8_t& byte) : byte_(byte) {}
-        std::uint8_t& byte_;
+        Ref(OccupancyGrid& grid, std::size_t cell) : grid_(grid), cell_(cell) {}
+        OccupancyGrid& grid_;
+        std::size_t cell_;
     };
 
-    Ref operator[](std::size_t cell) { return Ref(slots_[cell]); }
-    int operator[](std::size_t cell) const { return slots_[cell] == vacant ? -1 : slots_[cell]; }
-    void fill(int slot) { slots_.fill(slot < 0 ? vacant : static_cast<std::uint8_t>(slot)); }
+    Ref operator[](std::size_t cell) { return Ref(*this, cell); }
+    int operator[](std::size_t cell) const { return get(cell); }
+    void fill(int slot) {
+        const unsigned value = slot < 0 ? vacant : unsigned(slot);
+        low_.fill(static_cast<std::uint8_t>(value));
+        high_.fill(value & 0x100 ? 0xff : 0);
+    }
 
 private:
-    std::array<std::uint8_t, width * height> slots_{};
+    int get(std::size_t cell) const {
+        const unsigned value = low_[cell] | ((high_[cell / 8] >> (cell % 8)) & 1u) << 8;
+        return value == vacant ? -1 : int(value);
+    }
+    void set(std::size_t cell, int slot) {
+        const unsigned value = slot < 0 ? vacant : unsigned(slot);
+        low_[cell] = static_cast<std::uint8_t>(value);
+        auto& bits = high_[cell / 8];
+        const unsigned bit = 1u << (cell % 8);
+        bits = static_cast<std::uint8_t>(value & 0x100 ? bits | bit : bits & ~bit);
+    }
+
+    std::array<std::uint8_t, width * height> low_{};
+    std::array<std::uint8_t, width * height / 8> high_{};
 };
 static_assert(capacity < OccupancyGrid::vacant);
 
@@ -156,6 +194,9 @@ struct Genome {
     std::uint8_t hunting = 0, evasion = 0;
     std::uint8_t kin_reluctance = 0;
     std::uint8_t faction = 0;
+    // Morphology, present with Config::morphology. Founders' standard is 8, except
+    // pigment, which matches background_tone().
+    std::uint8_t body_size = 0, pigment = 0, pattern = 0, limbs = 0;
 
     int preferred_moisture() const { return 12 + moisture_preference * 12; }
 
@@ -294,6 +335,10 @@ struct Config {
     bool dynamic_environment = false;
     // Requires dynamic_environment. Positive regional rainfall arrives in storms.
     bool storm_fronts = false;
+    // Heritable body size, pigment, pattern, and limbs. Requires the food web.
+    bool morphology = false;
+    // The control: morphology genes are inherited and mutate but have no effect.
+    bool neutral_morphology = false;
 };
 
 class World {
@@ -323,6 +368,8 @@ public:
     bool staggered_growth() const { return staggered_growth_; }
     bool fruiting_plants() const { return fruiting_plants_; }
     bool dynamic_environment() const { return dynamic_environment_; }
+    bool morphology() const { return morphology_; }
+    bool neutral_morphology() const { return neutral_morphology_; }
     bool fruiting_shrub(std::size_t cell) const { return shrubs_[cell] != 0; }
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
     // Climate, read-only for observers such as the renderer.
@@ -368,6 +415,8 @@ public:
     bool load_checkpoint(const FactionCheckpoint& checkpoint);
     bool load_checkpoint(const FloraCheckpoint& checkpoint);
     bool load_checkpoint(const ClimateCheckpoint& checkpoint);
+    bool load_checkpoint(const StormCheckpoint& checkpoint);
+    bool load_checkpoint(const CapacityCheckpoint& checkpoint);
 
 private:
     World() = default;
@@ -419,6 +468,21 @@ private:
     void record_birth(Creature& newborn, const Creature& parent, StepObserver observer, const Creature* mate = nullptr);
     void kill(Creature& creature, StepObserver observer, DeathCause cause);
     std::uint8_t mutate(std::uint8_t trait);
+    // Morphology effects. Each is zero, or the founders' standard, unless the
+    // genes are expressed (see morphology_effects()).
+    bool morphology_effects() const { return morphology_ && trait_effects_ && !neutral_morphology_; }
+    int bite_limit(const Creature& creature, const Genome& effective) const;
+    int max_energy(const Creature& creature) const;
+    // An energy amount scaled by the creature's store: max_energy / 160 times `amount`.
+    int body_share(int amount, const Creature& creature) const { return amount * max_energy(creature) / 160; }
+    int body_upkeep(const Creature& creature) const;
+    int limb_reach(const Creature& creature) const;
+    int limb_stride(const Creature& creature) const;
+    int camouflage(const Creature& prey) const;
+    int concealment(const Creature& prey) const { return std::max(0, camouflage(prey)); }
+    int pattern_cover(const Creature& prey) const;
+    int body_odds(const Creature& hunter, const Creature& prey) const;
+    void inherit_morphology(Creature& child, const Creature& parent, const Creature* mate) const;
     std::uint8_t inherit_reluctance(const Creature& parent, std::uint64_t child,
                                     const Creature* mate = nullptr) const;
 
@@ -454,6 +518,7 @@ private:
     bool fruiting_plants_ = false;
     bool dynamic_environment_ = false;
     bool storm_fronts_ = false;
+    bool morphology_ = false, neutral_morphology_ = false;
     std::uint32_t climate_seed_ = 0;
 };
 

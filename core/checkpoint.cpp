@@ -9,7 +9,7 @@
 namespace petri {
 namespace {
 
-constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 16};
+constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 18};
 
 // Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
@@ -136,6 +136,8 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
     for (const auto store : soil_water_) {
         writer.put(store);
     }
+    writer.put(std::uint8_t(morphology_));
+    writer.put(std::uint8_t(neutral_morphology_));
     writer.put(metrics_.ticks);
     writer.put(metrics_.births);
     writer.put(metrics_.deaths);
@@ -162,25 +164,25 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
         writer.put(shrubs_[index]);
     }
     for (const auto& creature : creatures_) {
-        // Checkpoints keep the 64-bit field widths of format version 15.
-        writer.put(std::uint64_t(creature.id));
-        writer.put(std::uint64_t(creature.parent));
-        writer.put(std::uint64_t(creature.founder));
+        // Since version 17, IDs and lifetime counters keep their 32-bit widths in memory.
+        writer.put(creature.id);
+        writer.put(creature.parent);
+        writer.put(static_cast<std::uint8_t>(creature.founder));
         writer.put(creature.generation);
         writer.put(creature.cell);
         writer.put(creature.energy);
         writer.put(creature.genes.digestion);
         writer.put(creature.genes.thrift);
         writer.put(creature.genes.moisture_preference);
-        writer.put(std::uint64_t(creature.plants_eaten));
-        writer.put(std::uint64_t(creature.animal_eaten));
+        writer.put(creature.plants_eaten);
+        writer.put(creature.animal_eaten);
         writer.put(creature.nutrients_carried);
         writer.put(std::uint8_t(creature.excursion));
-        writer.put(std::uint64_t(creature.other_parent));
+        writer.put(creature.other_parent);
         writer.put(creature.breeding_cooldown);
         writer.put(creature.genes.mate_drive);
         writer.put(creature.genes.receptivity);
-        writer.put(std::uint64_t(creature.last_mate));
+        writer.put(creature.last_mate);
         writer.put(creature.nest_ticks);
         writer.put(creature.packed_plants);
         writer.put(creature.packed_animal);
@@ -188,11 +190,15 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
         writer.put(creature.genes.provision_drive);
         writer.put(creature.genes.hunting);
         writer.put(creature.genes.evasion);
-        writer.put(std::uint64_t(creature.hunt_target));
-        writer.put(std::uint64_t(creature.prey_killed));
+        writer.put(creature.hunt_target);
+        writer.put(creature.prey_killed);
         writer.put(creature.genes.kin_reluctance);
         writer.put(creature.genes.faction);
         writer.put(creature.packed_fruit);
+        writer.put(creature.genes.body_size);
+        writer.put(creature.genes.pigment);
+        writer.put(creature.genes.pattern);
+        writer.put(creature.genes.limbs);
     }
     writer.finish();
     return writer.total;
@@ -262,6 +268,14 @@ bool World::load_checkpoint(const ClimateCheckpoint& checkpoint) {
     return decode_checkpoint(checkpoint.data(), checkpoint.size(), 15);
 }
 
+bool World::load_checkpoint(const StormCheckpoint& checkpoint) {
+    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 16);
+}
+
+bool World::load_checkpoint(const CapacityCheckpoint& checkpoint) {
+    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 17);
+}
+
 bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version) {
     // Stage the decoded state so a rejected checkpoint leaves the running world intact.
     World decoded;
@@ -273,10 +287,14 @@ bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::u
 }
 
 bool World::load_checkpoint_in_place(const std::uint8_t* data, std::size_t size) {
-    // The current version, or version 15, which resumes with steady rainfall.
+    // The current version or one of the three before it, identified by size.
     std::uint8_t version = 0;
     if (size == std::tuple_size<Checkpoint>::value) {
         version = header.back();
+    } else if (size == std::tuple_size<CapacityCheckpoint>::value) {
+        version = 17;
+    } else if (size == std::tuple_size<StormCheckpoint>::value) {
+        version = 16;
     } else if (size == std::tuple_size<ClimateCheckpoint>::value) {
         version = 15;
     } else {
@@ -454,6 +472,15 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
             }
         }
     }
+    if (version >= 18) {
+        const auto morphology = reader.get<std::uint8_t>();
+        const auto neutral = reader.get<std::uint8_t>();
+        if (morphology > 1 || neutral > 1 || (morphology && !decoded.food_web_) || (neutral && !morphology)) {
+            return false;
+        }
+        decoded.morphology_ = morphology != 0;
+        decoded.neutral_morphology_ = neutral != 0;
+    }
     auto& metrics = decoded.metrics_;
     metrics.ticks = reader.get<std::uint64_t>();
     metrics.births = reader.get<std::uint64_t>();
@@ -518,7 +545,10 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         return false;
     }
     const auto total_creatures = decoded.next_id_ - 1;
-    if (metrics.deaths > total_creatures || total_creatures - metrics.deaths > capacity) {
+    // Versions before 17 stored 160 slots. The rest of the pool starts empty.
+    const bool narrow = version >= 17;
+    const int slots = narrow ? capacity : legacy_capacity;
+    if (metrics.deaths > total_creatures || total_creatures - metrics.deaths > std::uint64_t(slots)) {
         return false;
     }
 
@@ -555,23 +585,25 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
     unsigned active_nests = 0;
     std::uint64_t recorded_kills = 0;
     decoded.occupants_.fill(-1);
-    for (int slot = 0; slot < capacity; ++slot) {
+    for (int slot = 0; slot < slots; ++slot) {
         auto& creature = decoded.creatures_[slot];
-        // IDs are bounded by next_id_, which fits a CreatureId, so they narrow without loss.
+        // Before version 17, IDs and counters were 64 bits. IDs are bounded by
+        // next_id_, which fits a CreatureId, so they narrow without loss.
         // Lifetime counters wider than 32 bits saturate.
         bool id_overflow = false;
         const auto id = [&] {
-            const auto value = reader.get<std::uint64_t>();
+            const auto value = narrow ? reader.get<std::uint32_t>() : reader.get<std::uint64_t>();
             id_overflow |= value > max_creature_id;
             return static_cast<CreatureId>(value);
         };
         const auto lifetime = [&] {
-            return static_cast<std::uint32_t>(std::min<std::uint64_t>(reader.get<std::uint64_t>(), 0xffffffffu));
+            return narrow ? reader.get<std::uint32_t>()
+                          : static_cast<std::uint32_t>(std::min<std::uint64_t>(reader.get<std::uint64_t>(), 0xffffffffu));
         };
         std::uint64_t wide_ids[3];
-        for (auto& value : wide_ids) {
-            value = reader.get<std::uint64_t>();
-        }
+        wide_ids[0] = narrow ? reader.get<std::uint32_t>() : reader.get<std::uint64_t>();
+        wide_ids[1] = narrow ? reader.get<std::uint32_t>() : reader.get<std::uint64_t>();
+        wide_ids[2] = narrow ? reader.get<std::uint8_t>() : reader.get<std::uint64_t>();
         if (std::any_of(std::begin(wide_ids), std::end(wide_ids), [](std::uint64_t value) { return value > max_creature_id; })) {
             return false;
         }
@@ -618,6 +650,16 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         if (version >= 14) {
             creature.packed_fruit = reader.get<std::uint8_t>();
         }
+        if (version >= 18) {
+            creature.genes.body_size = reader.get<std::uint8_t>();
+            creature.genes.pigment = reader.get<std::uint8_t>();
+            creature.genes.pattern = reader.get<std::uint8_t>();
+            creature.genes.limbs = reader.get<std::uint8_t>();
+        }
+        const auto& genes = creature.genes;
+        const bool any_morphology = genes.body_size || genes.pigment || genes.pattern || genes.limbs;
+        const bool valid_morphology = valid_trait(genes.body_size) && valid_trait(genes.pigment) &&
+                                      valid_trait(genes.pattern) && valid_trait(genes.limbs);
         if (id_overflow) {
             return false;
         }
@@ -632,13 +674,17 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
                 creature.last_mate || creature.nest_ticks || creature.provisions() ||
                 creature.genes.guard_drive || creature.genes.provision_drive || creature.genes.hunting ||
                 creature.genes.evasion || creature.hunt_target || creature.prey_killed ||
-                creature.genes.kin_reluctance || faction) {
+                creature.genes.kin_reluctance || faction || any_morphology) {
                 return false;
             }
             continue;
         }
+        if (decoded.morphology_ ? !valid_morphology : any_morphology) {
+            return false;
+        }
         if (creature.id >= decoded.next_id_ || creature.cell >= decoded.cells_.size() ||
-            decoded.occupants_[creature.cell] >= 0 || creature.energy == 0 || creature.energy > 160 ||
+            decoded.occupants_[creature.cell] >= 0 || creature.energy == 0 ||
+            creature.energy > decoded.max_energy(creature) ||
             !valid_trait(creature.genes.digestion) || !valid_trait(creature.genes.thrift) ||
             creature.plants_eaten > metrics.plants_eaten || creature.animal_eaten > metrics.animal_eaten ||
             (decoded.connected_biomes_ ? !valid_trait(creature.genes.moisture_preference)

@@ -22,9 +22,24 @@ namespace petri {
 
 enum class DietShape : std::uint8_t { meat, mixed, plant };
 
-// How a creature looks, derived from its genome.
+// How a creature looks, derived from its genome. Bit layout (32 bits):
+//   0-1    diet shape (DietShape)
+//   2-3    body color: the biome of the preferred moisture (Biome)
+//   4-5    back height in the 16x16 detail sprite, minus 4
+//   6-8    faction marker, 0 for none
+//   9      1 when the genome carries morphology genes; bits 10-20 are zero otherwise
+//   10-12  body size class 0-7: (body_size - 1) / 2, so 8 (the founders' standard) is class 3
+//   13-16  pigment 1-15, on the background_tone() scale: 1 matches the driest ground,
+//          15 the wettest. Biome edges fall at tone 3 (scrub to grassland) and 7
+//          (grassland to wetland)
+//   17-18  pattern class 0-3: (pattern - 1) / 4. 0 is a plain coat, 3 a bold
+//          disruptive pattern
+//   19-20  limb class 0-3: (limbs - 1) / 4. 0 is stubby, 3 long
+//   21-31  zero
+// Each morphology trait has an ecological effect (see Genome in world.hpp). A
+// renderer must draw every look, including bits it does not yet use.
 struct Look {
-    std::uint16_t bits = 0;
+    std::uint32_t bits = 0;
 
     DietShape shape() const { return static_cast<DietShape>(bits & 3); }
     // Biome of the preferred moisture, used for body color in connected worlds.
@@ -32,6 +47,11 @@ struct Look {
     // Height of the back line in the 16x16 detail sprite, 4 to 7.
     int back() const { return 4 + ((bits >> 4) & 3); }
     std::uint8_t faction() const { return static_cast<std::uint8_t>((bits >> 6) & 7); }
+    bool morphology() const { return (bits >> 9) & 1; }
+    int size_class() const { return (bits >> 10) & 7; }
+    int pigment() const { return (bits >> 13) & 15; }
+    int pattern() const { return (bits >> 17) & 3; }
+    int limbs() const { return (bits >> 19) & 3; }
 
     friend bool operator==(Look a, Look b) { return a.bits == b.bits; }
 };
@@ -95,6 +115,8 @@ struct RenderClimate {
                a.rainfall == b.rainfall && std::equal(a.storms.begin(), a.storms.end(), b.storms.begin(), same_storm);
     }
 };
+
+RenderClimate render_climate(const World& world);
 
 // Regional rainfall plus season at a cell, as World::weather_at computes it.
 int climate_bias(const RenderClimate& climate, std::size_t cell);

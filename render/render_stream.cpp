@@ -7,12 +7,23 @@ namespace petri::stream {
 namespace {
 
 constexpr std::size_t record_header = 3;
-constexpr std::size_t creature_bytes = 9;
-constexpr std::size_t event_bytes = 2 + 2 * 8;
+constexpr std::size_t update_record = record_header + 11;
+constexpr std::size_t creature_prefix = 2 + 2 + 1;
+constexpr std::size_t creature_bytes = 2 + 4 + 2 + 4;
+constexpr std::size_t creatures_per_record = 255;
+constexpr std::size_t actor_bytes = 4 + 2 + 4;
+constexpr std::size_t event_bytes = 2 + 2 * actor_bytes;
 constexpr std::size_t cell_bytes = 3;
 constexpr std::size_t cell_count = width * height;
 constexpr std::size_t end_record = record_header + 2 + 4;
 constexpr std::size_t climate_bytes = 2 + climate_nodes + storm_slots * storm_bytes;
+
+// The most bytes a full creature list can take.
+constexpr std::size_t max_creature_list = (capacity + creatures_per_record - 1) / creatures_per_record *
+    (record_header + creature_prefix) + capacity * creature_bytes;
+// With every slot alive the list still fits the first payload beside the update
+// and end records, so even a one-payload budget sends it whole.
+static_assert(update_record + max_creature_list + end_record <= payload_bytes);
 
 struct Writer {
     std::array<std::uint8_t, payload_bytes> buffer{};
@@ -39,14 +50,16 @@ struct Writer {
         put16(0);
     }
     void finish() {
-        const auto length = size - record - record_header;
-        buffer[record + 1] = static_cast<std::uint8_t>(length);
-        buffer[record + 2] = static_cast<std::uint8_t>(length >> 8);
+        patch16(record + 1, static_cast<unsigned>(size - record - record_header));
+    }
+    void patch16(std::size_t at, unsigned value) {
+        buffer[at] = static_cast<std::uint8_t>(value);
+        buffer[at + 1] = static_cast<std::uint8_t>(value >> 8);
     }
     void actor(const RenderActor& actor) {
         put32(actor.id);
         put16(actor.cell);
-        put16(actor.look.bits);
+        put32(actor.look.bits);
     }
     void cell(const RenderCell& cell) {
         put8(cell.terrain);
@@ -77,7 +90,7 @@ struct Reader {
         RenderActor actor;
         actor.id = get32();
         actor.cell = static_cast<std::uint16_t>(get16());
-        actor.look.bits = static_cast<std::uint16_t>(get16());
+        actor.look.bits = get32();
         return actor;
     }
 };
@@ -147,8 +160,42 @@ void Encoder::reset() {
     refresh_cursor_ = 0;
 }
 
+namespace {
+
+// What the encoder reads, from a World or from a captured RenderState.
+struct WorldSource {
+    const World& world;
+    std::uint64_t tick() const { return world.metrics().ticks; }
+    bool connected_biomes() const { return world.connected_biomes(); }
+    RenderCell cell(std::size_t index) const { return render_cell(world, index); }
+    RenderCreature creature(std::size_t slot) const { return render_creature(world.creatures()[slot]); }
+    RenderClimate climate() const { return render_climate(world); }
+};
+
+struct StateSource {
+    const RenderState& state;
+    std::uint64_t tick() const { return state.tick; }
+    bool connected_biomes() const { return state.connected_biomes; }
+    RenderCell cell(std::size_t index) const { return state.cells[index]; }
+    RenderCreature creature(std::size_t slot) const { return state.creatures[slot]; }
+    const RenderClimate& climate() const { return state.climate; }
+};
+
+} // namespace
+
 EncodeStats Encoder::encode(const World& world, const EventLog& events, std::size_t max_payloads, Sink sink,
                             void* context) {
+    return encode_from(WorldSource{world}, events, max_payloads, sink, context);
+}
+
+EncodeStats Encoder::encode(const RenderState& state, const EventLog& events, std::size_t max_payloads, Sink sink,
+                            void* context) {
+    return encode_from(StateSource{state}, events, max_payloads, sink, context);
+}
+
+template<class Source>
+EncodeStats Encoder::encode_from(const Source& source, const EventLog& events, std::size_t max_payloads, Sink sink,
+                                 void* context) {
     EncodeStats stats;
     if (max_payloads == 0) {
         return stats;
@@ -156,7 +203,7 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
     if (!primed_) {
         // Nothing is known about the receiver: mark every cell as different.
         for (std::size_t index = 0; index < cell_count; ++index) {
-            auto cell = render_cell(world, index);
+            auto cell = source.cell(index);
             cell.plants = static_cast<std::uint8_t>(~cell.plants);
             shadow_.cells[index] = cell;
         }
@@ -167,42 +214,59 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
     ++update_;
 
     w.begin(Record::update);
-    w.put64(world.metrics().ticks);
+    w.put64(source.tick());
     w.put16(update_);
-    w.put8(world.connected_biomes() ? 1 : 0);
+    w.put8(source.connected_biomes() ? 1 : 0);
     w.finish();
-    shadow_.tick = world.metrics().ticks;
-    shadow_.connected_biomes = world.connected_biomes();
+    shadow_.tick = source.tick();
+    shadow_.connected_biomes = source.connected_biomes();
 
-    // A complete creature list fits one record and repairs itself every update.
-    std::size_t living = 0;
-    for (const auto& creature : world.creatures()) {
-        living += creature.alive();
-    }
-    out.reserve(1 + living * creature_bytes);
-    w.begin(Record::creatures);
-    w.put8(static_cast<unsigned>(living));
-    for (std::size_t slot = 0; slot < capacity; ++slot) {
-        const auto creature = render_creature(world.creatures()[slot]);
-        shadow_.creatures[slot] = creature;
-        if (creature.alive()) {
-            w.put8(static_cast<unsigned>(slot));
-            w.put32(creature.id);
-            w.put16(creature.cell);
-            w.put16(creature.look.bits);
+    // The complete creature list, every update, as records that each cover a
+    // range of slots. A record ends at 255 creatures or at the payload's room.
+    for (std::size_t slot = 0; slot < capacity;) {
+        if (!out.reserve(creature_prefix + creature_bytes)) {
+            // Unreachable: the static_assert above keeps room for the whole list.
+            break;
         }
+        const std::size_t fit = std::min(creatures_per_record,
+                                         (out.room() - record_header - creature_prefix) / creature_bytes);
+        const std::size_t first = slot;
+        w.begin(Record::creatures);
+        w.put16(static_cast<unsigned>(first));
+        const std::size_t span_at = w.size;
+        w.put16(0);
+        const std::size_t count_at = w.size;
+        w.put8(0);
+        std::size_t count = 0;
+        for (; slot < capacity; ++slot) {
+            const auto creature = source.creature(slot);
+            if (creature.alive()) {
+                if (count == fit) {
+                    break;
+                }
+                w.put16(static_cast<unsigned>(slot));
+                w.put32(creature.id);
+                w.put16(creature.cell);
+                w.put32(creature.look.bits);
+                ++count;
+            }
+            shadow_.creatures[slot] = creature;
+        }
+        w.patch16(span_at, static_cast<unsigned>(slot - first));
+        w.buffer[count_at] = static_cast<std::uint8_t>(count);
+        w.finish();
     }
-    w.finish();
 
     // The climate is small, so every update carries it.
     out.reserve(climate_bytes);
     w.begin(Record::climate);
-    w.put8((world.weather_active() ? 1 : 0) | (world.storm_fronts() ? 2 : 0));
-    w.put8(static_cast<std::uint8_t>(world.weather_active() ? world.seasonal_bias() : 0));
-    for (const auto rain : world.rainfall()) {
+    const auto& climate = source.climate();
+    w.put8((climate.active ? 1 : 0) | (climate.storm_fronts ? 2 : 0));
+    w.put8(static_cast<std::uint8_t>(climate.seasonal));
+    for (const auto rain : climate.rainfall) {
         w.put8(static_cast<std::uint8_t>(rain));
     }
-    for (const auto& storm : world.storms()) {
+    for (const auto& storm : climate.storms) {
         w.put32(static_cast<std::uint32_t>(storm.x));
         w.put32(static_cast<std::uint32_t>(storm.y));
         w.put16(static_cast<std::uint16_t>(storm.vx));
@@ -211,11 +275,7 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
         w.put8(storm.strength);
     }
     w.finish();
-    shadow_.climate.active = world.weather_active();
-    shadow_.climate.storm_fronts = world.storm_fronts();
-    shadow_.climate.seasonal = static_cast<std::int8_t>(world.weather_active() ? world.seasonal_bias() : 0);
-    shadow_.climate.rainfall = world.rainfall();
-    shadow_.climate.storms = world.storms();
+    shadow_.climate = climate;
 
     // Events in order, as many records as needed.
     const auto* next_event = events.begin();
@@ -248,7 +308,7 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
             w.begin(Record::cells);
             w.put16(static_cast<unsigned>(first));
             for (std::size_t index = first; index < first + fit; ++index) {
-                const auto cell = render_cell(world, index);
+                const auto cell = source.cell(index);
                 w.cell(cell);
                 shadow_.cells[index] = cell;
             }
@@ -260,15 +320,15 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
     };
     bool budget_left = true;
     for (std::size_t index = 0; index < cell_count && budget_left;) {
-        if (render_cell(world, index) == shadow_.cells[index]) {
+        if (source.cell(index) == shadow_.cells[index]) {
             ++index;
             continue;
         }
         std::size_t end = index + 1;
         while (end < cell_count) {
-            if (render_cell(world, end) != shadow_.cells[end]) {
+            if (source.cell(end) != shadow_.cells[end]) {
                 ++end;
-            } else if (end + 1 < cell_count && render_cell(world, end + 1) != shadow_.cells[end + 1]) {
+            } else if (end + 1 < cell_count && source.cell(end + 1) != shadow_.cells[end + 1]) {
                 end += 2;
             } else {
                 break;
@@ -289,7 +349,7 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
 
     if (!budget_left) {
         for (std::size_t index = 0; index < cell_count; ++index) {
-            stats.cells_pending += render_cell(world, index) != shadow_.cells[index];
+            stats.cells_pending += source.cell(index) != shadow_.cells[index];
         }
     }
 
@@ -329,28 +389,46 @@ bool Decoder::apply(const std::uint8_t* payload, std::size_t size, RenderState& 
                 update_ = static_cast<std::uint16_t>(body.get16());
                 mirror.connected_biomes = body.get8() & 1;
                 events.clear();
+                creature_slots_ = 0;
                 in_update_ = true;
                 complete_ = false;
                 ++stats_.updates;
             }
             break;
         case Record::creatures: {
-            const std::size_t count = length ? body.get8() : 0;
-            valid = length == 1 + count * creature_bytes;
-            if (valid) {
-                mirror.creatures.fill({});
-                for (std::size_t i = 0; i < count && valid; ++i) {
-                    const auto slot = body.get8();
-                    RenderCreature creature;
-                    creature.id = body.get32();
-                    creature.cell = static_cast<std::uint16_t>(body.get16());
-                    creature.look.bits = static_cast<std::uint16_t>(body.get16());
-                    valid = slot < capacity && creature.cell < cell_count && creature.id != 0;
-                    if (valid) {
-                        mirror.creatures[slot] = creature;
-                    }
-                }
+            valid = length >= creature_prefix;
+            if (!valid) {
+                break;
             }
+            const std::size_t first = body.get16();
+            const std::size_t span = body.get16();
+            const std::size_t count = body.get8();
+            valid = length == creature_prefix + count * creature_bytes && first + span <= capacity &&
+                    count <= span;
+            // Check every entry before the mirror changes.
+            const std::size_t entries = body.at;
+            for (std::size_t i = 0, previous = first; i < count && valid; ++i) {
+                const std::size_t slot = body.get16();
+                const auto id = body.get32();
+                const auto cell = body.get16();
+                body.get32();
+                valid = slot >= previous && slot < first + span && cell < cell_count && id != 0;
+                previous = slot + 1;
+            }
+            if (!valid) {
+                break;
+            }
+            body.at = entries;
+            std::fill(mirror.creatures.begin() + first, mirror.creatures.begin() + first + span, RenderCreature{});
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto slot = body.get16();
+                auto& creature = mirror.creatures[slot];
+                creature.id = body.get32();
+                creature.cell = static_cast<std::uint16_t>(body.get16());
+                creature.look.bits = body.get32();
+            }
+            // The encoder never repeats a slot within an update.
+            creature_slots_ += span;
             break;
         }
         case Record::events: {
@@ -411,7 +489,9 @@ bool Decoder::apply(const std::uint8_t* payload, std::size_t size, RenderState& 
             if (valid) {
                 const auto number = body.get16();
                 const auto checksum = body.get32();
-                if (in_update_ && number == update_) {
+                if (in_update_ && number == update_ && creature_slots_ != capacity) {
+                    ++stats_.creature_gaps;
+                } else if (in_update_ && number == update_) {
                     complete_ = true;
                     ++stats_.complete;
                     if (checksum != cells_checksum(mirror)) {

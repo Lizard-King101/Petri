@@ -1,3 +1,4 @@
+#include "checkpoint_compat.hpp"
 #include "observation.hpp"
 #include "terrain.hpp"
 
@@ -575,8 +576,45 @@ void check_attack_presentation() {
 
 } // namespace
 
+void check_older_checkpoint() {
+    // The observatory world, with storm fronts, saved as version 16 (160 slots,
+    // 64-bit fields) resumes exactly. So does a storm-free copy saved as version 15.
+    for (const bool storms : {true, false}) {
+        auto config = petri::observatory_config();
+        config.storm_fronts = storms;
+        auto original = std::make_unique<petri::World>(14, config);
+        for (int tick = 0; tick < 1500; ++tick) {
+            original->step();
+        }
+        auto current = std::make_unique<petri::Checkpoint>();
+        original->save_checkpoint(*current);
+        const auto version17 = petri::compat::to_version17(*current);
+        check(version17 != nullptr, "The observatory test world used morphology");
+        auto restored = std::make_unique<petri::World>(1);
+        if (storms) {
+            check(petri::compat::to_version15(*version17) == nullptr, "Version 15 cannot hold storm fronts");
+            const auto old = petri::compat::to_version16(*version17);
+            check(old != nullptr, "The observatory test world used a slot past 160");
+            check(restored->load_checkpoint(*old), "A version 16 observatory checkpoint was rejected");
+        } else {
+            const auto old = petri::compat::to_version15(*version17);
+            check(old != nullptr, "The observatory test world used a slot past 160");
+            check(restored->load_checkpoint(*old), "A version 15 observatory checkpoint was rejected");
+        }
+        auto again = std::make_unique<petri::Checkpoint>();
+        restored->save_checkpoint(*again);
+        check(*again == *current, "An older observatory checkpoint did not re-save identically");
+        for (int tick = 0; tick < 500; ++tick) {
+            original->step();
+            restored->step();
+        }
+        check(restored->fingerprint() == original->fingerprint(), "An observatory run resumed from an older checkpoint diverged");
+    }
+}
+
 int main() {
     check_wide_world();
+    check_older_checkpoint();
     check_connected_biomes();
     check_motion();
     check_panel_camera();

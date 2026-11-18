@@ -62,6 +62,10 @@ HuntDecision World::skipped_hunt(const Creature& hunter, int range, int offset) 
                 (creatures_[slot].nest_ticks && creatures_[slot].has_parent(hunter.id))) {
                 continue;
             }
+            const int distance = cell_distance(cell, hunter.cell);
+            if (distance > 1 && distance > range - concealment(creatures_[slot])) {
+                continue;
+            }
             saw_prey = true;
             if (cell_distance(cell, hunter.cell) == 1 || step_toward(hunter.cell, cell, offset) >= 0) {
                 return HuntDecision::forage_or_rest;
@@ -87,8 +91,10 @@ World::HuntPlan World::plan_hunt(const Creature& hunter, const Genome& genes, in
     }
 
     const int range = hunt_range(skill);
+    // Long limbs let a hunter lunge and sprint at lower skill.
+    const int agility = skill + 2 * limb_reach(hunter);
     const int x = hunter.cell % width, y = hunter.cell / width;
-    const int bite = std::min(body_mass, 9 - genes.thrift / 4);
+    const int bite = std::min(body_mass, bite_limit(hunter, genes));
     HuntPlan plan{HuntDecision::no_prey};
     bool saw_prey = false, has_route = false, can_pay = false;
     bool viable_without_reluctance = false, viable_same_faction = false;
@@ -106,8 +112,12 @@ World::HuntPlan World::plan_hunt(const Creature& hunter, const Genome& genes, in
             if (prey.nest_ticks && prey.has_parent(hunter.id)) {
                 continue;
             }
-            saw_prey = true;
             const int distance = cell_distance(hunter.cell, cell);
+            // Prey that matches its background must be closer to be seen.
+            if (distance > 1 && distance > range - concealment(prey)) {
+                continue;
+            }
+            saw_prey = true;
             const bool adjacent = distance == 1;
             int step = adjacent ? -1 : step_toward(hunter.cell, cell, offset);
             if (!adjacent && step < 0) {
@@ -118,11 +128,11 @@ World::HuntPlan World::plan_hunt(const Creature& hunter, const Genome& genes, in
                 continue;
             }
             can_pay = true;
-            const bool lunge = skill >= 10 && distance == 2 && cells_[step].plants < 14 &&
+            const bool lunge = agility >= 10 && distance == 2 && cells_[step].plants < 14 &&
                 hunter.energy > upkeep + strike_cost + chase_cost;
             const bool striking = adjacent || lunge;
             int movement_cost = chase_cost;
-            const bool sprint = skill >= 11 && distance >= 3 && hunter.energy > upkeep + 2 * chase_cost &&
+            const bool sprint = agility >= 11 && distance >= 3 && hunter.energy > upkeep + 2 * chase_cost &&
                                 cells_[step].plants < 16;
             if (sprint) {
                 const int extra = step_toward(step, cell, offset);
@@ -134,9 +144,9 @@ World::HuntPlan World::plan_hunt(const Creature& hunter, const Genome& genes, in
 
             const int shield = prey.nest_ticks && guarded(prey) ? 52 : 0;
             const int chance = std::clamp(58 + (skill - 8) * 7 - prey.energy / 10 - cover(cells_[cell]) +
-                (prey.nest_ticks ? 24 : 0) - shield - (lunge ? 12 : 0), 5, 95);
+                (prey.nest_ticks ? 24 : 0) - shield - (lunge ? 12 : 0) + body_odds(hunter, prey), 5, 95);
             const int reserve = hunt_energy(prey.energy, digestion, true);
-            const int reward = std::min(160 - int(hunter.energy), reserve + bite * 2 * digestion / 10);
+            const int reward = std::min(max_energy(hunter) - int(hunter.energy), reserve + bite * 2 * digestion / 10);
             const int steps_left = striking ? 0 : cell_distance(step, cell);
             // A chase consumes an action, and the strike may still be several turns away.
             const int turns = 1 + steps_left;
@@ -204,7 +214,8 @@ void World::prepare_evasion(StepObserver observer) {
         const int origin = prey.cell;
         const int skill = trait_effects_ ? prey.genes.evasion : 8;
         const int distance = cell_distance(origin, threat);
-        const int range = 1 + skill / 4;
+        // Long limbs let prey react to a threat from farther away.
+        const int range = std::max(1, 1 + skill / 4 + limb_reach(prey));
         if (distance > range || (range - distance + 2) * skill < 18 + std::min(12, int(cells_[origin].plants))) {
             continue;
         }

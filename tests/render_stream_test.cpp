@@ -92,7 +92,8 @@ void lossless_round_trip() {
             worst_cells = std::max(worst_cells, stats.cells_sent);
             ++updates;
         }
-        check(f.decoder.stats().checksum_mismatches == 0 && f.decoder.stats().malformed == 0,
+        check(f.decoder.stats().checksum_mismatches == 0 && f.decoder.stats().malformed == 0 &&
+                  f.decoder.stats().creature_gaps == 0,
               "A lossless stream reported damage");
         std::printf("STREAM world=%dx%d ticks_per_update=%d mean_bytes=%zu max_bytes=%zu mean_cells=%zu max_cells=%zu\n",
                     width, height, ticks, total / updates, worst, cells / updates, worst_cells);
@@ -219,6 +220,110 @@ void malformed_payloads_rejected() {
         }
         f.decoder.apply(noise.data(), noise.size(), *f.mirror, f.received);
     }
+}
+
+// Re-cuts payloads into one payload per record, so a test can lose a single record.
+std::vector<Payload> split_records(const std::vector<Payload>& payloads) {
+    std::vector<Payload> records;
+    for (const auto& payload : payloads) {
+        for (std::size_t at = 0; at + 3 <= payload.size();) {
+            const std::size_t length = payload[at + 1] | payload[at + 2] << 8;
+            records.emplace_back(payload.begin() + at, payload.begin() + at + 3 + length);
+            at += 3 + length;
+        }
+    }
+    return records;
+}
+
+std::size_t creature_records(const std::vector<Payload>& records) {
+    return std::count_if(records.begin(), records.end(), [](const Payload& record) {
+        return record[0] == static_cast<std::uint8_t>(stream::Record::creatures);
+    });
+}
+
+void full_capacity_list() {
+    // Every slot alive, with looks that use all 32 bits.
+    auto world = std::make_unique<World>(14, stream_config());
+    auto state = std::make_unique<RenderState>();
+    capture(*world, *state);
+    for (std::size_t slot = 0; slot < capacity; ++slot) {
+        state->creatures[slot] = {CreatureId(1000 + slot), static_cast<std::uint16_t>(slot * 7 % (width * height)),
+                                  Look{0x80000001u ^ std::uint32_t(slot) * 0x9e3779b9u}};
+    }
+    auto encoder = std::make_unique<stream::Encoder>();
+    auto mirror = std::make_unique<RenderState>();
+    stream::Decoder decoder;
+    EventLog none, received;
+
+    // Even a one-payload budget carries the whole list.
+    std::vector<Payload> payloads;
+    encoder->encode(*state, none, 1, collect, &payloads);
+    check(payloads.size() == 1, "A full creature list did not fit one payload");
+    const auto full_bytes = payloads[0].size();
+    check(creature_records(split_records(payloads)) == 2, "A full list should take two creature records");
+    check(decoder.apply(payloads[0].data(), payloads[0].size(), *mirror, received) && decoder.complete(),
+          "A full creature list was not decoded");
+    check(mirror->creatures == state->creatures, "A full creature list changed in transit");
+
+    // Losing the second creature record leaves only its slots as they were.
+    const auto before = mirror->creatures;
+    for (auto& creature : state->creatures) {
+        creature.cell = static_cast<std::uint16_t>((creature.cell + 1) % (width * height));
+    }
+    payloads.clear();
+    encoder->encode(*state, none, 16, collect, &payloads);
+    const auto records = split_records(payloads);
+    std::size_t seen = 0, second_first = 0;
+    for (const auto& record : records) {
+        if (record[0] == static_cast<std::uint8_t>(stream::Record::creatures) && ++seen == 2) {
+            second_first = record[3] | record[4] << 8;
+            continue;
+        }
+        check(decoder.apply(record.data(), record.size(), *mirror, received), "A valid record was rejected");
+    }
+    check(second_first == 255, "The second creature record should start after 255 creatures");
+    check(!decoder.complete() && decoder.stats().creature_gaps == 1, "A lost creature record was not reported");
+    for (std::size_t slot = 0; slot < capacity; ++slot) {
+        check(mirror->creatures[slot] == (slot < second_first ? state->creatures[slot] : before[slot]),
+              "A lost creature record changed slots outside its range");
+    }
+
+    // The next update repairs the list.
+    payloads.clear();
+    encoder->encode(*state, none, 16, collect, &payloads);
+    for (const auto& payload : payloads) {
+        check(decoder.apply(payload.data(), payload.size(), *mirror, received), "A valid payload was rejected");
+    }
+    check(decoder.complete() && same_state(*mirror, *state), "The next update did not repair the creature list");
+
+    // Records that break the slot rules are rejected, and the mirror keeps its creatures.
+    const auto creature_record = [](std::uint16_t first, std::uint16_t span, std::vector<std::uint16_t> slots) {
+        Payload record{static_cast<std::uint8_t>(stream::Record::creatures), 0, 0,
+                       static_cast<std::uint8_t>(first), static_cast<std::uint8_t>(first >> 8),
+                       static_cast<std::uint8_t>(span), static_cast<std::uint8_t>(span >> 8),
+                       static_cast<std::uint8_t>(slots.size())};
+        for (const auto slot : slots) {
+            const std::uint8_t entry[] = {static_cast<std::uint8_t>(slot), static_cast<std::uint8_t>(slot >> 8),
+                                          9, 0, 0, 0, 3, 0, 1, 2, 3, 4};
+            record.insert(record.end(), std::begin(entry), std::end(entry));
+        }
+        const auto length = record.size() - 3;
+        record[1] = static_cast<std::uint8_t>(length);
+        record[2] = static_cast<std::uint8_t>(length >> 8);
+        return record;
+    };
+    const auto rejected = [&](const Payload& record) {
+        const auto creatures = mirror->creatures;
+        return !decoder.apply(record.data(), record.size(), *mirror, received) && mirror->creatures == creatures;
+    };
+    check(rejected(creature_record(10, 5, {12, 11})), "Out-of-order creature slots were accepted");
+    check(rejected(creature_record(10, 5, {15})), "A creature outside its record's range was accepted");
+    check(rejected(creature_record(capacity - 2, 3, {})), "A slot range past capacity was accepted");
+    check(rejected(creature_record(10, 1, {10, 10})), "More creatures than slots were accepted");
+    check(!rejected(creature_record(10, 5, {10, 14})), "A valid creature record was rejected");
+    check(mirror->creatures[10].id == 9 && !mirror->creatures[11].alive() && mirror->creatures[14].look.bits == 0x04030201u,
+          "A valid creature record was not applied to its range");
+    std::printf("STREAM full_capacity creatures=%d one_payload_bytes=%zu\n", capacity, full_bytes);
 }
 
 void observation_from_mirror_matches() {
@@ -355,4 +460,5 @@ int main() {
     tight_budget_catches_up();
     dropped_payloads_repair();
     malformed_payloads_rejected();
+    full_capacity_list();
 }

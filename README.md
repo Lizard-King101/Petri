@@ -37,9 +37,9 @@ cmp build/world.petri build/continuous.petri
 ```
 
 On resume, `--ticks` counts additional ticks and peak population covers the
-current invocation. Version-11 checkpoints store little-endian
+current invocation. Checkpoints store little-endian
 fields. The magic and version precede the RNG state, ecology settings, counters,
-row-major cells, and 160 creature slots in update order. Version-1 files
+row-major cells, and 320 creature slots in update order. Version-1 files
 resume the plant-only ecology and start collecting diet counters at load.
 Version-2 files resume scavenging with predation disabled. Version-3 files
 resume the original predation rules. Version-4 files resume the food web
@@ -58,6 +58,11 @@ ripe fruit, carried fruit, and the fruit consumption counter.
 Version 15 also stores the climate seed and regional rainfall state.
 Version 16 stores the storm-front flag, up to four storms, and the soil water
 at each climate node. Version-15 files resume with steady rainfall.
+Version 17 holds 320 creature slots instead of 160 and stores IDs and lifetime
+counters at their 32-bit widths. Versions 1–16 load into the first 160 slots,
+and the rest of the pool starts empty. Version 18 adds the morphology settings
+and four morphology genes per slot (94,457 bytes at 128×64, inside a
+96 KiB QSPI slot). Version 17 files resume with morphology off.
 Checkpoint size depends on world dimensions.
 The file ends with a 64-bit FNV-1a
 checksum. Load validates the checksum and state, rebuilds occupancy and
@@ -75,7 +80,7 @@ persistence milestone.
   vacated. Offspring inherit digestion and metabolic thrift with bounded
   mutations. Thrift reduces upkeep and limits bite size.
 - Each living creature carries its own ID, parent ID, founder ID, and generation.
-  The fixed pool holds 160 creatures. Full-pool birth attempts increment a counter
+  The fixed pool holds 320 creatures. Full-pool birth attempts increment a counter
   and leave parental energy intact.
 - `core/` owns simulation state and advances it one tick at a time.
   `apps/` owns argument parsing, wall-clock timing, and console output. A future
@@ -83,19 +88,73 @@ persistence milestone.
 
 ## Memory layout
 
-`World` occupies 26,552 bytes in the 64×32 build and 72,664 bytes in the
-128×64 build, down from 41,392 and 109,008 bytes.
+`World` occupies 39,104 bytes in the 64×32 build and 86,104 bytes in the
+128×64 build, including the storm state. With 160 slots it took 26,552 and 72,664 bytes, down from
+41,392 and 109,008.
 
 - Each cell uses 6 bytes. Detritus is 16 bits. The highest measured value was
   8,031, in a 64×32 run at 255 nutrients with every ecology feature enabled.
   A million-tick run at 24 nutrients held a single-cell peak of about 5,700.
   A deposit that would exceed 65,535 is clipped. The CLI then reports
   `detritus_clipped`. That counter is not stored in checkpoints.
-- Cell occupancy uses one byte per cell, and fruiting shrubs use half a byte.
-- Each creature slot uses 64 bytes. IDs and lifetime counters are 32 bits.
+- Cell occupancy uses nine bits per cell: a byte plus one bit packed eight
+  cells to a byte. Fruiting shrubs use half a byte.
+- Each creature slot uses 68 bytes, 4 of them for the morphology genes. IDs
+  and lifetime counters are 32 bits.
   If all 2³²−1 IDs are used, further births count as capacity blocks.
-- Checkpoints, fingerprints, and `PTR4` observations keep their earlier 64-bit
-  fields. Loading rejects IDs above 2³²−1 and detritus above 65,535.
+- Fingerprints and `PTR4` observations keep their earlier 64-bit fields.
+  Checkpoints did until version 17. Loading rejects IDs above 2³²−1 and
+  detritus above 65,535.
+
+### Environment early-outs
+
+`World::recycle` returns at once for a cell with no carcass and no
+detritus, and `World::grow_plants` returns for a cell with no soil
+nutrients or full plant cover. Both skip only work that cannot change
+anything. The 68 matched runs described below, each with `--save`,
+produced byte-identical CLI output and checkpoints before and after.
+Native ticks/s, best of three 20,000-tick runs at seed 14:
+
+| World | Before | After | Gain |
+| --- | ---: | ---: | ---: |
+| 128×64 observatory | 25,907 | 27,887 | 8% |
+| 128×64 default | 97,556 | 187,726 | 92% |
+| 128×64 food web | 52,724 | 68,216 | 29% |
+| 64×32 default | 205,620 | 248,865 | 21% |
+| 64×32 food web | 55,171 | 55,686 | 1% |
+
+The observatory gains least because its creatures, not its cells, take
+most of each step.
+
+### 320 creature slots
+
+The pool grew from 160 to 320 slots on November 18, 2026. Three of the four
+regional-weather runs in [the experiments](docs/experiments/README.md) had
+reached the 160 limit. Below the old limit
+the simulation is unchanged: across 68 matched runs (both world sizes, eight
+or ten flag sets, seeds 1, 4, 14, and 42, 20,000 ticks), every CLI field
+except the fingerprint matched the 160-slot build, and none of those runs
+reached 160 creatures. The fingerprint changes because it hashes every slot.
+All 68 version-15 checkpoints from those runs loaded and resumed for 3,000
+ticks with the same results as the 160-slot build. `tests/` builds a
+version-15 checkpoint from a version-17 one and checks that it resumes
+exactly.
+
+| 128×64 build | 160 slots | 320 slots |
+| --- | ---: | ---: |
+| `World` | 72,664 | 84,568 |
+| Render state, and the encoder that holds one | 25,872 | 28,432 |
+| Event log | 2,584 | 3,608 |
+| `Panel` | 7,568 | 10,640 |
+| `PTR4` observation buffer | 12,805 | 21,445 |
+| Checkpoint | 89,738 | 92,938 |
+
+The figures are from before the morphology genes, which add 4 bytes per
+slot: the 128×64 `World` is now 85,856 bytes and its checkpoint 94,220. With
+the storm state merged in they are 86,104 and 94,457.
+The render state grew because `Look` is now 32 bits. Native speed did not
+change measurably: 26,616 ticks/s for the seed 14 observatory world, against
+27,887 before the change and 25,907 before the environment early-outs.
 
 Across 180 matched runs covering both world sizes and every ecology flag,
 final fingerprints, CLI output, and saved checkpoints matched the previous
@@ -283,6 +342,42 @@ dry. The observatory world and current firmware enable storms. See the
 The [long environment comparison](docs/experiments/README.md#regional-weather-and-succession)
 records changes in habitat, shrubs, population, and the conserved material
 budget on matched seeds.
+
+## Morphology genes
+
+`--morphology` (with `--food-web`) gives each creature four more heritable
+genes: body size, pigment, pattern, and limbs. Each one changes what the
+creature can do and has a cost:
+
+- **Body size** raises the bite and the energy store and helps both to
+  catch prey and to resist capture. It costs upkeep, and larger parents
+  must store more before breeding, because young are provisioned in
+  proportion to body size.
+- **Pigment** is causal camouflage. Prey whose pigment matches the ground
+  under it is harder to catch and is seen only at closer range. A strong
+  mismatch makes it easier to catch. No pigment matches every habitat.
+- **Pattern** hides prey in dense vegetation and shows it on bare ground,
+  where a plain coat hides better.
+- **Limbs** set foraging speed: long limbs sometimes take a second paid
+  step, and short ones sometimes miss a step. They also help in chases and
+  escapes. They cost upkeep.
+
+`--neutral-morphology` is the matched control: the genes are inherited and
+mutate but do nothing, and the ecology is then identical to a run without
+`--morphology`. In matched 200,000-tick runs, camouflage and plain coats
+were selected only where hunting was common. Body size rose under
+predation in the rich 64×32 food web and fell, with a much narrower spread
+than the control's, in the lean observatory world. Limbs lengthened in the
+64×32 world. The [morphology experiment](docs/experiments/README.md#morphology-genes)
+has the rules, numbers, and commands.
+
+```sh
+./build/petri --seed 5 --nutrients 80 --food-web --predation --adaptive-hunts --morphology --ticks 200000
+```
+
+The genes appear in each creature's `Look` (bits 9–20, documented in
+`render/render_state.hpp`) so the renderer can draw them. The panel does
+not draw them yet, and the observatory configuration leaves morphology off.
 
 ## Earlier plant-only experiments
 

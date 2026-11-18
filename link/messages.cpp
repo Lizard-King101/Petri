@@ -35,7 +35,7 @@ void fields(Stream& s, T& t) {
 
 } // namespace
 
-std::size_t write_census(const CensusEntry* entries, std::uint8_t first_slot, std::uint8_t count, std::uint8_t* out) {
+std::size_t write_census(const CensusEntry* entries, std::uint16_t first_slot, std::uint8_t count, std::uint8_t* out) {
     Out o{out};
     o.put(first_slot);
     o.put(count);
@@ -44,7 +44,7 @@ std::size_t write_census(const CensusEntry* entries, std::uint8_t first_slot, st
         o.put(e.id), o.put(e.parent), o.put(e.generation), o.put(e.plants_eaten), o.put(e.animal_eaten);
         o.put(e.energy), o.put(e.founder), o.put(e.digestion), o.put(e.thrift), o.put(e.moisture_preference);
     }
-    return 2 + count * census_entry_bytes;
+    return census_header_bytes + count * census_entry_bytes;
 }
 
 CensusEntry read_census_entry(const std::uint8_t* at) {

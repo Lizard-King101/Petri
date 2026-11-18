@@ -49,6 +49,7 @@ inline constexpr std::size_t telemetry_bytes = 5 * 8 + 9 * 4 + 4 * 2;
 
 // Creature details the renderer does not need but the observatory shows.
 // A census message covers consecutive slots; empty slots have id 0.
+// Layout: first slot (u16), count (u8), then the entries.
 struct CensusEntry {
     std::uint32_t id = 0, parent = 0, generation = 0, plants_eaten = 0, animal_eaten = 0;
     std::uint16_t energy = 0;
@@ -56,9 +57,10 @@ struct CensusEntry {
 };
 
 inline constexpr std::size_t census_entry_bytes = 5 * 4 + 2 + 4;
-inline constexpr std::size_t census_slots_per_message = 80;
+inline constexpr std::size_t census_header_bytes = 3;
+inline constexpr std::size_t census_slots_per_message = 128;
 
-std::size_t write_census(const CensusEntry* entries, std::uint8_t first_slot, std::uint8_t count, std::uint8_t* out);
+std::size_t write_census(const CensusEntry* entries, std::uint16_t first_slot, std::uint8_t count, std::uint8_t* out);
 // Calls `entry(slot, entry)` for each slot in the message.
 template<class Visit>
 bool read_census(const std::uint8_t* data, std::size_t size, Visit&& entry);
@@ -71,15 +73,15 @@ bool read(const std::uint8_t* data, std::size_t size, Telemetry& telemetry);
 
 template<class Visit>
 bool read_census(const std::uint8_t* data, std::size_t size, Visit&& entry) {
-    if (size < 2) {
+    if (size < census_header_bytes) {
         return false;
     }
-    const std::size_t first = data[0], count = data[1];
-    if (size != 2 + count * census_entry_bytes) {
+    const std::size_t first = data[0] | std::size_t(data[1]) << 8, count = data[2];
+    if (size != census_header_bytes + count * census_entry_bytes) {
         return false;
     }
     for (std::size_t i = 0; i < count; ++i) {
-        entry(first + i, read_census_entry(data + 2 + i * census_entry_bytes));
+        entry(first + i, read_census_entry(data + census_header_bytes + i * census_entry_bytes));
     }
     return true;
 }

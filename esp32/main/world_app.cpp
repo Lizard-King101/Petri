@@ -29,8 +29,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <optional>
+#include <new>
+#include <utility>
 
 namespace {
 
@@ -49,6 +51,17 @@ constexpr std::int64_t min_update_us = 30000, paused_update_us = 1000000, teleme
 // How long to wait for the boot handshake before starting fresh, unless a restore is under way.
 constexpr std::int64_t boot_wait_us = 5000000, boot_wait_limit_us = 30000000;
 constexpr std::size_t checkpoint_size = std::tuple_size<Checkpoint>::value;
+// Older versions restore too; the current one is the largest, so the buffer fits them all.
+constexpr bool restorable_size(std::uint32_t size) {
+    return size == checkpoint_size || size == std::tuple_size<CapacityCheckpoint>::value ||
+           size == std::tuple_size<StormCheckpoint>::value || size == std::tuple_size<ClimateCheckpoint>::value;
+}
+static_assert(std::tuple_size<CapacityCheckpoint>::value <= checkpoint_size &&
+              std::tuple_size<StormCheckpoint>::value <= checkpoint_size &&
+              std::tuple_size<ClimateCheckpoint>::value <= checkpoint_size);
+constexpr std::size_t census_messages = (capacity + link::census_slots_per_message - 1) / link::census_slots_per_message;
+static_assert(payloads_per_update + 1 + census_messages <= pool_size);
+static_assert(link::census_header_bytes + link::census_slots_per_message * link::census_entry_bytes <= link::payload_max);
 
 enum Boot : int { waiting, fresh, restore };
 std::atomic<int> boot_decision{waiting};
@@ -56,6 +69,7 @@ std::atomic<bool> awaiting{true}, restoring{false};
 std::atomic<std::uint32_t> save_request{0};
 std::uint8_t* restore_buffer = nullptr;
 std::uint32_t restore_received = 0;
+std::uint32_t restore_size = 0;
 
 struct Outgoing {
     link::Type type = link::Type::idle;
@@ -66,9 +80,29 @@ struct Outgoing {
 QueueHandle_t free_queue, send_queue;
 std::atomic<std::uint16_t> requested_speed{1};
 
-std::optional<World> world;
-EventLog events;
-stream::Encoder encoder;
+// The world, the event log and the encoder's shadow of the mirror live on the
+// heap, about 100 KB together. Static DRAM then keeps room for the Bluetooth
+// controller, which reserves about 56 KB of that segment.
+World* world = nullptr;
+EventLog* events = nullptr;
+stream::Encoder* encoder = nullptr;
+
+// Allocates and constructs one T, or stops the app: nothing runs without these.
+template<class T, class... Args>
+T* make(const char* name, Args&&... args) {
+    void* storage = heap_caps_malloc(sizeof(T), MALLOC_CAP_8BIT);
+    if (!storage) {
+        std::printf("WORLD out of memory: %s needs %u bytes, largest block %u\n", name, unsigned(sizeof(T)),
+                    unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+        std::abort();
+    }
+    return new (storage) T(std::forward<Args>(args)...);
+}
+
+void rebuild_world() {
+    world->~World();
+    new (world) World(seed, observatory_config());
+}
 
 void IRAM_ATTR on_setup(spi_slave_transaction_t*) {
     gpio_ll_set_level(&GPIO, ready_pin, 0);
@@ -126,14 +160,14 @@ void send_telemetry(const SimStats& stats, std::uint32_t ticks_per_second_measur
     t.population = static_cast<std::uint16_t>(metrics.population);
     t.ticks_per_second = requested_speed.load();
     t.capacity_blocks = static_cast<std::uint16_t>(metrics.capacity_blocks);
-    t.events_dropped = static_cast<std::uint16_t>(events.dropped());
+    t.events_dropped = static_cast<std::uint16_t>(events->dropped());
     out->type = link::Type::telemetry;
     out->size = static_cast<std::uint16_t>(link::write(t, out->data));
     xQueueSend(send_queue, &out, portMAX_DELAY);
 }
 
 void send_census() {
-    // Two messages cover all 160 slots; the observatory shows these details.
+    // Three messages cover all 320 slots; the observatory shows these details.
     static link::CensusEntry entries[link::census_slots_per_message];
     for (std::size_t first = 0; first < capacity; first += link::census_slots_per_message) {
         auto* out = take_free();
@@ -153,7 +187,7 @@ void send_census() {
         }
         out->type = link::Type::census;
         out->size = static_cast<std::uint16_t>(
-            link::write_census(entries, static_cast<std::uint8_t>(first), static_cast<std::uint8_t>(count), out->data));
+            link::write_census(entries, static_cast<std::uint16_t>(first), static_cast<std::uint8_t>(count), out->data));
         xQueueSend(send_queue, &out, portMAX_DELAY);
     }
 }
@@ -228,12 +262,14 @@ void start_world() {
     int expected = waiting;
     const bool timed_out = boot_decision.compare_exchange_strong(expected, fresh);
     bool restored = false;
-    world.emplace(seed, observatory_config());
     if (boot_decision == restore) {
-        restored = world->load_checkpoint_in_place(restore_buffer, checkpoint_size);
+        restored = world->load_checkpoint_in_place(restore_buffer, restore_size);
+        if (!restored) {
+            // A failed in-place decode leaves the world unspecified.
+            rebuild_world();
+        }
     }
     if (!restored) {
-        world.emplace(seed, observatory_config());
         for (unsigned tick = 0; tick < warmup_ticks; ++tick) {
             world->step();
         }
@@ -243,6 +279,9 @@ void start_world() {
         heap_caps_free(restore_buffer);
         restore_buffer = nullptr;
     }
+    // The encoder and the payload pool take the space the restore buffer used.
+    events = make<EventLog>("event log");
+    encoder = make<stream::Encoder>("encoder");
     for (std::size_t i = 0; i < pool_size; ++i) {
         auto* buffer = static_cast<Outgoing*>(heap_caps_malloc(sizeof(Outgoing), MALLOC_CAP_8BIT));
         xQueueSend(free_queue, &buffer, 0);
@@ -266,7 +305,7 @@ void sim_task(void*) {
         const auto speed = requested_speed.load();
         if (speed && now >= next_tick) {
             const auto started = esp_timer_get_time();
-            world->step(events.observer(*world));
+            world->step(events->observer(*world));
             const auto elapsed = static_cast<std::uint32_t>(esp_timer_get_time() - started);
             stats.max_step_us = elapsed > stats.max_step_us ? elapsed : stats.max_step_us;
             stepped = true;
@@ -283,12 +322,12 @@ void sim_task(void*) {
         }
 
         const bool due = stepped ? now - last_update >= min_update_us : now - last_update >= paused_update_us;
-        // Keep three buffers for telemetry and the census.
-        if (due && uxQueueMessagesWaiting(free_queue) >= payloads_per_update + 3) {
+        // Keep buffers for telemetry and the census.
+        if (due && uxQueueMessagesWaiting(free_queue) >= payloads_per_update + 1 + census_messages) {
             const auto started = esp_timer_get_time();
-            const auto sent = encoder.encode(*world, events, payloads_per_update, send_payload, nullptr);
+            const auto sent = encoder->encode(*world, *events, payloads_per_update, send_payload, nullptr);
             const auto elapsed = static_cast<std::uint32_t>(esp_timer_get_time() - started);
-            events.clear();
+            events->clear();
             stepped = false;
             last_update = now;
             ++stats.updates;
@@ -409,7 +448,8 @@ void link_task(void*) {
                 }
                 break;
             case link::Command::restore_begin:
-                if (boot_open && restore_buffer && command.value == checkpoint_size) {
+                if (boot_open && restore_buffer && restorable_size(command.value)) {
+                    restore_size = command.value;
                     restore_received = 0;
                     restoring = true;
                 } else if (boot_open) {
@@ -418,8 +458,8 @@ void link_task(void*) {
                 break;
             case link::Command::restore_end:
                 if (boot_open && restoring) {
-                    const bool whole = restore_received == checkpoint_size &&
-                                       link::crc32(restore_buffer, checkpoint_size) == command.value;
+                    const bool whole = restore_received == restore_size &&
+                                       link::crc32(restore_buffer, restore_size) == command.value;
                     restoring = false;
                     boot_decision = whole ? restore : fresh;
                 }
@@ -429,7 +469,7 @@ void link_task(void*) {
             link::ChunkHeader chunk;
             const auto data = in.length - link::chunk_header_bytes;
             if (link::read(body, in.length, chunk) && chunk.offset == restore_received &&
-                chunk.total == checkpoint_size) {
+                chunk.total == restore_size && data <= restore_size - chunk.offset) {
                 std::memcpy(restore_buffer + chunk.offset, body + link::chunk_header_bytes, data);
                 restore_received += data;
             } else {
@@ -445,11 +485,16 @@ void link_task(void*) {
 void start_world_app() {
     free_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
     send_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
-    // The restore buffer is allocated first, while the heap has its largest block.
-    // start_world() frees it and then fills the payload pool.
+    // The two large blocks are allocated first, while the heap is unfragmented:
+    // the restore buffer, then the world it decodes into. start_world() frees the
+    // restore buffer and then allocates the encoder and the payload pool.
+    const auto largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     restore_buffer = static_cast<std::uint8_t*>(heap_caps_malloc(checkpoint_size, MALLOC_CAP_8BIT));
-    std::printf("WORLD boot restore_buffer=%d largest_block=%u\n", restore_buffer ? 1 : 0,
-                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    // Constructed now so a fresh start needs no second allocation. A restore replaces it in place.
+    world = make<World>("world", seed, observatory_config());
+    std::printf("WORLD boot restore_buffer=%d largest_block=%u world_bytes=%u checkpoint_bytes=%u free=%u\n",
+                restore_buffer ? 1 : 0, unsigned(largest), unsigned(sizeof(World)), unsigned(checkpoint_size),
+                unsigned(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
     xTaskCreatePinnedToCore(link_task, "link", 6144, nullptr, 10, nullptr, 0);
     xTaskCreatePinnedToCore(sim_task, "petri", 8192, nullptr, 5, nullptr, 1);
 }

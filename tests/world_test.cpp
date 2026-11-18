@@ -1,4 +1,6 @@
+#include "checkpoint_compat.hpp"
 #include "life.hpp"
+#include "render_state.hpp"
 #include "world.hpp"
 
 #include <algorithm>
@@ -694,6 +696,161 @@ void checkpoint_replay() {
     }
 }
 
+void older_checkpoints_load() {
+    // Version 17 lacks morphology. Versions 16 and 15 also have 160 slots and
+    // 64-bit fields, and load into the first 160 slots; version 15 also lacks
+    // the storm state. All resume exactly.
+    const auto config = petri::Config{80, true, 1, 0, true, true, false, false, true, true, true, true,
+                                      true, false, {42, 1}, true, {2, 14, true}, false, true, false, true};
+    petri::World original(42, config);
+    for (int tick = 0; tick < 1500; ++tick) {
+        original.step();
+    }
+    petri::Checkpoint current{};
+    original.save_checkpoint(current);
+    const auto version17 = petri::compat::to_version17(current);
+    check(version17 != nullptr, "The test world used morphology");
+    const auto version16 = petri::compat::to_version16(*version17);
+    const auto version15 = petri::compat::to_version15(*version17);
+    check(version16 && version15, "The test world used a slot past the old versions' 160");
+    petri::World from17(1), from16(1), from15(1);
+    check(from17.load_checkpoint(*version17), "A version 17 checkpoint was rejected");
+    check(from16.load_checkpoint(*version16), "A version 16 checkpoint was rejected");
+    check(from15.load_checkpoint(*version15), "A version 15 checkpoint was rejected");
+    for (const auto* restored : {&from17, &from16, &from15}) {
+        check(restored->fingerprint() == original.fingerprint(), "An older checkpoint restored a different world");
+        petri::Checkpoint again{};
+        restored->save_checkpoint(again);
+        check(again == current, "An older checkpoint did not re-save as the same current bytes");
+    }
+    for (int tick = 0; tick < 500; ++tick) {
+        original.step();
+        from17.step();
+        from16.step();
+        from15.step();
+    }
+    check(from17.fingerprint() == original.fingerprint() && from16.fingerprint() == original.fingerprint() &&
+              from15.fingerprint() == original.fingerprint(),
+          "A run resumed from an older checkpoint diverged");
+
+    auto damaged = *version15;
+    damaged[5] = 17;
+    petri::compat::seal(damaged);
+    check(!from15.load_checkpoint(damaged), "A version 15 layout was accepted as version 17");
+}
+
+petri::Config morphology_config(bool neutral) {
+    // The 64x32 food web with adaptive hunts, where predation is frequent.
+    petri::Config config{80, true, 1, 0, true, true};
+    config.adaptive_hunts = true;
+    config.morphology = true;
+    config.neutral_morphology = neutral;
+    return config;
+}
+
+void morphology_genes() {
+    // Without the food web the genes are absent, like the other food-web traits.
+    auto plain = petri::Config{};
+    plain.morphology = true;
+    check(!petri::World(42, plain).morphology(), "Morphology was enabled without the food web");
+
+    // The neutral control inherits and mutates the genes on separate draws, so its
+    // ecology matches a run without morphology exactly.
+    auto without = morphology_config(true);
+    without.morphology = without.neutral_morphology = false;
+    petri::World control(5, morphology_config(true)), baseline(5, without), treated(5, morphology_config(false));
+    std::array<bool, 4 * petri::Genome::maximum + 4> seen{};
+    bool diverged = false;
+    for (int tick = 0; tick < 4000; ++tick) {
+        control.step();
+        baseline.step();
+        treated.step();
+        for (std::size_t slot = 0; slot < petri::capacity; ++slot) {
+            const auto& a = control.creatures()[slot];
+            const auto& b = baseline.creatures()[slot];
+            check(a.id == b.id && a.cell == b.cell && a.energy == b.energy && a.genes.digestion == b.genes.digestion,
+                  "The neutral morphology control diverged from a run without morphology");
+            for (const auto& creature : {a, treated.creatures()[slot]}) {
+                if (!creature.alive()) {
+                    continue;
+                }
+                const auto& genes = creature.genes;
+                int gene = 0;
+                for (const auto value : {genes.body_size, genes.pigment, genes.pattern, genes.limbs}) {
+                    check(value >= petri::Genome::minimum && value <= petri::Genome::maximum,
+                          "A morphology gene escaped its bounds");
+                    seen[gene++ * (petri::Genome::maximum + 1) + value] = true;
+                }
+            }
+        }
+        diverged |= treated.metrics().births != control.metrics().births;
+    }
+    check(control.metrics().births == baseline.metrics().births && control.metrics().kills == baseline.metrics().kills,
+          "The neutral morphology control changed births or kills");
+    check(diverged, "Expressed morphology had no effect on the ecology");
+    // Mutation explores past the founders' range of 5-11 for each gene.
+    for (int gene = 0; gene < 4; ++gene) {
+        const auto first = seen.begin() + gene * (petri::Genome::maximum + 1);
+        check(std::count(first, first + petri::Genome::maximum + 1, true) >= 8,
+              "A morphology gene did not vary");
+    }
+
+    // Expressed genes are saved, restored, and resumed exactly.
+    petri::Checkpoint bytes{};
+    treated.save_checkpoint(bytes);
+    check(!petri::compat::to_version17(bytes), "A morphology checkpoint converted to version 17");
+    petri::World restored(1);
+    check(restored.load_checkpoint(bytes) && restored.fingerprint() == treated.fingerprint(),
+          "A morphology checkpoint did not restore");
+    for (int tick = 0; tick < 300; ++tick) {
+        treated.step();
+        restored.step();
+    }
+    check(restored.fingerprint() == treated.fingerprint(), "A morphology run diverged after restoring");
+
+    // A living creature's genes must stay in bounds; empty slots must hold none.
+    constexpr std::size_t slots_at = std::tuple_size<petri::Checkpoint>::value - 8 -
+                                     petri::capacity * petri::checkpoint_creature_bytes;
+    treated.save_checkpoint(bytes);
+    const auto living = std::find_if(treated.creatures().begin(), treated.creatures().end(),
+                                     [](const petri::Creature& creature) { return creature.alive(); }) -
+                        treated.creatures().begin();
+    const auto empty = std::find_if(treated.creatures().begin(), treated.creatures().end(),
+                                    [](const petri::Creature& creature) { return !creature.alive(); }) -
+                       treated.creatures().begin();
+    for (const auto [slot, value] : {std::pair<long, std::uint8_t>{living, 0}, {living, 16}, {empty, 8}}) {
+        auto damaged = bytes;
+        damaged[slots_at + slot * petri::checkpoint_creature_bytes + 59] = value;
+        petri::compat::seal(damaged);
+        check(!restored.load_checkpoint(damaged), "An invalid morphology gene was accepted");
+    }
+    auto neutral_alone = bytes;
+    neutral_alone[petri::compat::morphology_settings_at] = 0;
+    petri::compat::seal(neutral_alone);
+    check(!restored.load_checkpoint(neutral_alone), "Morphology genes were accepted with morphology off");
+}
+
+void morphology_look() {
+    petri::Genome genes{8, 8};
+    check((petri::look_of(genes).bits >> 9) == 0, "A look without morphology used the morphology bits");
+    genes.body_size = 15;
+    genes.pigment = 1;
+    genes.pattern = 13;
+    genes.limbs = 4;
+    const auto look = petri::look_of(genes);
+    check(look.morphology() && look.size_class() == 7 && look.pigment() == 1 && look.pattern() == 3 &&
+              look.limbs() == 0 && (look.bits >> 21) == 0,
+          "Morphology genes were not mapped into the look");
+    genes.body_size = 8;
+    genes.pigment = 15;
+    genes.pattern = 1;
+    genes.limbs = 15;
+    const auto other = petri::look_of(genes);
+    check(other.size_class() == 3 && other.pigment() == 15 && other.pattern() == 0 && other.limbs() == 3 &&
+              (other.bits & 511) == (look.bits & 511),
+          "Morphology changed the older look bits");
+}
+
 void reseal(petri::Checkpoint& bytes) {
     std::uint64_t hash = 14695981039346656037ull;
     for (std::size_t index = 0; index + 8 < bytes.size(); ++index) {
@@ -713,8 +870,7 @@ void detritus_limit() {
     }
     petri::Checkpoint saved{};
     original.save_checkpoint(saved);
-    constexpr std::size_t cells = 6 + 151 + petri::climate_nodes + 1 + petri::storm_slots * petri::storm_bytes +
-                                    petri::climate_nodes * 4 + 15 * 8;
+    constexpr std::size_t cells = 6 + 153 + petri::climate_nodes + petri::storm_state_bytes + 15 * 8;
     constexpr std::size_t stride = 9, nutrients = 1, detritus = 3;
     const auto get = [](const petri::Checkpoint& bytes, std::size_t at) {
         return bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | std::uint32_t(bytes[at + 3]) << 24;
@@ -880,6 +1036,9 @@ int main() {
     kin_relationships();
     fruiting_plants();
     checkpoint_replay();
+    older_checkpoints_load();
+    morphology_genes();
+    morphology_look();
     detritus_limit();
     checkpoint_streams();
     selection_scenarios();

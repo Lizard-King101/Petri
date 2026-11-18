@@ -21,8 +21,16 @@ RenderActor actor_of(const Creature& creature) {
 Look look_of(const Genome& genes) {
     const int back = 7 - (Genome::maximum - genes.thrift) / 5;
     const auto body = static_cast<unsigned>(biome_at(genes.preferred_moisture()));
-    return {static_cast<std::uint16_t>(static_cast<unsigned>(diet_shape(genes)) | body << 2 |
-                                       unsigned(std::clamp(back, 4, 7) - 4) << 4 | (genes.faction & 7u) << 6)};
+    std::uint32_t bits = static_cast<unsigned>(diet_shape(genes)) | body << 2 |
+                         unsigned(std::clamp(back, 4, 7) - 4) << 4 | (genes.faction & 7u) << 6;
+    if (genes.body_size) {
+        const auto clamped = [](unsigned gene) {
+            return std::clamp<unsigned>(gene, Genome::minimum, Genome::maximum) - 1;
+        };
+        bits |= 1u << 9 | clamped(genes.body_size) / 2 << 10 | (clamped(genes.pigment) + 1) << 13 |
+                clamped(genes.pattern) / 4 << 17 | clamped(genes.limbs) / 4 << 19;
+    }
+    return {bits};
 }
 
 RenderCell render_cell(const World& world, std::size_t index) {
@@ -63,14 +71,20 @@ int climate_bias(const RenderClimate& climate, std::size_t cell) {
     return (north * (climate_spacing - dy) + south * dy) / (climate_spacing * climate_spacing) + climate.seasonal;
 }
 
+RenderClimate render_climate(const World& world) {
+    RenderClimate climate;
+    climate.active = world.weather_active();
+    climate.seasonal = static_cast<std::int8_t>(world.weather_active() ? world.seasonal_bias() : 0);
+    climate.rainfall = world.rainfall();
+    climate.storm_fronts = world.storm_fronts();
+    climate.storms = world.storms();
+    return climate;
+}
+
 void capture(const World& world, RenderState& state) {
     state.tick = world.metrics().ticks;
     state.connected_biomes = world.connected_biomes();
-    state.climate.active = world.weather_active();
-    state.climate.seasonal = static_cast<std::int8_t>(world.weather_active() ? world.seasonal_bias() : 0);
-    state.climate.rainfall = world.rainfall();
-    state.climate.storm_fronts = world.storm_fronts();
-    state.climate.storms = world.storms();
+    state.climate = render_climate(world);
     for (std::size_t index = 0; index < state.cells.size(); ++index) {
         state.cells[index] = render_cell(world, index);
     }
