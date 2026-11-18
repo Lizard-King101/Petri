@@ -29,8 +29,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <optional>
+#include <new>
+#include <utility>
 
 namespace {
 
@@ -66,9 +68,29 @@ struct Outgoing {
 QueueHandle_t free_queue, send_queue;
 std::atomic<std::uint16_t> requested_speed{1};
 
-std::optional<World> world;
-EventLog events;
-stream::Encoder encoder;
+// The world, the event log and the encoder's shadow of the mirror live on the
+// heap, about 100 KB together. Static DRAM then keeps room for the Bluetooth
+// controller, which reserves about 56 KB of that segment.
+World* world = nullptr;
+EventLog* events = nullptr;
+stream::Encoder* encoder = nullptr;
+
+// Allocates and constructs one T, or stops the app: nothing runs without these.
+template<class T, class... Args>
+T* make(const char* name, Args&&... args) {
+    void* storage = heap_caps_malloc(sizeof(T), MALLOC_CAP_8BIT);
+    if (!storage) {
+        std::printf("WORLD out of memory: %s needs %u bytes, largest block %u\n", name, unsigned(sizeof(T)),
+                    unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+        std::abort();
+    }
+    return new (storage) T(std::forward<Args>(args)...);
+}
+
+void rebuild_world() {
+    world->~World();
+    new (world) World(seed, observatory_config());
+}
 
 void IRAM_ATTR on_setup(spi_slave_transaction_t*) {
     gpio_ll_set_level(&GPIO, ready_pin, 0);
@@ -126,7 +148,7 @@ void send_telemetry(const SimStats& stats, std::uint32_t ticks_per_second_measur
     t.population = static_cast<std::uint16_t>(metrics.population);
     t.ticks_per_second = requested_speed.load();
     t.capacity_blocks = static_cast<std::uint16_t>(metrics.capacity_blocks);
-    t.events_dropped = static_cast<std::uint16_t>(events.dropped());
+    t.events_dropped = static_cast<std::uint16_t>(events->dropped());
     out->type = link::Type::telemetry;
     out->size = static_cast<std::uint16_t>(link::write(t, out->data));
     xQueueSend(send_queue, &out, portMAX_DELAY);
@@ -228,12 +250,14 @@ void start_world() {
     int expected = waiting;
     const bool timed_out = boot_decision.compare_exchange_strong(expected, fresh);
     bool restored = false;
-    world.emplace(seed, observatory_config());
     if (boot_decision == restore) {
         restored = world->load_checkpoint_in_place(restore_buffer, checkpoint_size);
+        if (!restored) {
+            // A failed in-place decode leaves the world unspecified.
+            rebuild_world();
+        }
     }
     if (!restored) {
-        world.emplace(seed, observatory_config());
         for (unsigned tick = 0; tick < warmup_ticks; ++tick) {
             world->step();
         }
@@ -243,6 +267,9 @@ void start_world() {
         heap_caps_free(restore_buffer);
         restore_buffer = nullptr;
     }
+    // The encoder and the payload pool take the space the restore buffer used.
+    events = make<EventLog>("event log");
+    encoder = make<stream::Encoder>("encoder");
     for (std::size_t i = 0; i < pool_size; ++i) {
         auto* buffer = static_cast<Outgoing*>(heap_caps_malloc(sizeof(Outgoing), MALLOC_CAP_8BIT));
         xQueueSend(free_queue, &buffer, 0);
@@ -266,7 +293,7 @@ void sim_task(void*) {
         const auto speed = requested_speed.load();
         if (speed && now >= next_tick) {
             const auto started = esp_timer_get_time();
-            world->step(events.observer(*world));
+            world->step(events->observer(*world));
             const auto elapsed = static_cast<std::uint32_t>(esp_timer_get_time() - started);
             stats.max_step_us = elapsed > stats.max_step_us ? elapsed : stats.max_step_us;
             stepped = true;
@@ -286,9 +313,9 @@ void sim_task(void*) {
         // Keep three buffers for telemetry and the census.
         if (due && uxQueueMessagesWaiting(free_queue) >= payloads_per_update + 3) {
             const auto started = esp_timer_get_time();
-            const auto sent = encoder.encode(*world, events, payloads_per_update, send_payload, nullptr);
+            const auto sent = encoder->encode(*world, *events, payloads_per_update, send_payload, nullptr);
             const auto elapsed = static_cast<std::uint32_t>(esp_timer_get_time() - started);
-            events.clear();
+            events->clear();
             stepped = false;
             last_update = now;
             ++stats.updates;
@@ -445,11 +472,16 @@ void link_task(void*) {
 void start_world_app() {
     free_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
     send_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
-    // The restore buffer is allocated first, while the heap has its largest block.
-    // start_world() frees it and then fills the payload pool.
+    // The two large blocks are allocated first, while the heap is unfragmented:
+    // the restore buffer, then the world it decodes into. start_world() frees the
+    // restore buffer and then allocates the encoder and the payload pool.
+    const auto largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     restore_buffer = static_cast<std::uint8_t*>(heap_caps_malloc(checkpoint_size, MALLOC_CAP_8BIT));
-    std::printf("WORLD boot restore_buffer=%d largest_block=%u\n", restore_buffer ? 1 : 0,
-                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+    // Constructed now so a fresh start needs no second allocation. A restore replaces it in place.
+    world = make<World>("world", seed, observatory_config());
+    std::printf("WORLD boot restore_buffer=%d largest_block=%u world_bytes=%u checkpoint_bytes=%u free=%u\n",
+                restore_buffer ? 1 : 0, unsigned(largest), unsigned(sizeof(World)), unsigned(checkpoint_size),
+                unsigned(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
     xTaskCreatePinnedToCore(link_task, "link", 6144, nullptr, 10, nullptr, 0);
     xTaskCreatePinnedToCore(sim_task, "petri", 8192, nullptr, 5, nullptr, 1);
 }
