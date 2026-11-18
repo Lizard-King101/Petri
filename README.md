@@ -927,6 +927,9 @@ The board's ESP32 is an ESP32-D0WD-V3 with 4 MB of flash, running Adafruit
 nina-fw 1.2.2. A verified full image and its restore steps are kept in the
 private `backups/` directory. See [the dual-processor plan](docs/DUAL_PROCESSOR.md).
 
+[`tools/board/`](tools/board/README.md) has scripts that flash both chips,
+drive the display over USB, record the ESP32 self-test, and run soak tests.
+
 On Linux, the board's serial port is reassigned each time the board
 re-enumerates. To give the logged-in user access to Adafruit devices,
 including after each re-enumeration, install a udev rule once:
