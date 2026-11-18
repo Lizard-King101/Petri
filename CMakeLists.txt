@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.16)
+project(Petri LANGUAGES CXX)
+
+set(CMAKE_CXX_EXTENSIONS OFF)
+option(PETRI_WIDE_WORLD "Build the 128 by 64 habitat" OFF)
+add_library(petri_core core/world.cpp core/checkpoint.cpp core/nests.cpp core/hunting.cpp)
+target_include_directories(petri_core PUBLIC core)
+target_compile_features(petri_core PUBLIC cxx_std_17)
+if(PETRI_WIDE_WORLD)
+    target_compile_definitions(petri_core PUBLIC PETRI_WIDE_WORLD=1)
+endif()
+
+add_library(petri_render render/life.cpp render/panel.cpp render/observation.cpp)
+target_include_directories(petri_render PUBLIC render)
+target_link_libraries(petri_render PUBLIC petri_core)
+
+add_executable(petri apps/main.cpp)
+target_link_libraries(petri PRIVATE petri_core)
+
+find_package(Threads REQUIRED)
+add_executable(petri_observer apps/observe.cpp)
+target_link_libraries(petri_observer PRIVATE petri_render Threads::Threads)
+
+include(CTest)
+if(BUILD_TESTING)
+    if(PETRI_WIDE_WORLD)
+        add_executable(petri_tests tests/wide_world_test.cpp)
+    else()
+        add_executable(petri_tests tests/world_test.cpp)
+    endif()
+    target_link_libraries(petri_tests PRIVATE petri_render)
+    add_test(NAME petri_world COMMAND petri_tests)
+    add_test(NAME petri_cli_smoke COMMAND petri --seed 42 --ticks 1000)
+    set_tests_properties(petri_cli_smoke PROPERTIES
+        PASS_REGULAR_EXPRESSION "tick=1000")
+endif()

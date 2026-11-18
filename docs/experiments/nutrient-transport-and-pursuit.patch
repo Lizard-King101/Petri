@@ -1,0 +1,79 @@
+--- a/core/world.cpp
++++ b/core/world.cpp
+@@ -324,7 +324,7 @@
+     } else if (metrics_.ticks % 2 == 0) {
+         update_plants();
+     }
+-    if (food_web_ && (staggered_growth_ || metrics_.ticks % 4 == 0)) {
++    if (carcass_decay_ && (staggered_growth_ || metrics_.ticks % 4 == 0)) {
+         transport_nutrients();
+     }
+     if (connected_biomes_ && !staggered_growth_ && metrics_.ticks % 16 == 0) {
+@@ -427,6 +427,8 @@
+     const auto adjacent = neighbors(creature.cell);
+     int destination = -1;
+     int prey_slot = -1;
++    int close_pursuit_step = -1;
++    int nearest_prey_energy = 161;
+     const int meat_digestion = effective.meat_digestion();
+     const auto recovered_energy = [&](int energy) {
+         return hunt_energy(energy, meat_digestion, adaptive_hunts_);
+@@ -446,7 +448,7 @@
+             return 0;
+         }
+         const int bite_gain = std::min(body_mass, bite_limit) * meat_digestion * 2 / 10;
+-        return chance(prey) * (bite_gain + (food_web_ ? recovered_energy(prey.energy) : 0));
++        return chance(prey) * (bite_gain + (food_web_ ? recovered_energy(prey.energy) : prey.energy * meat_digestion / 24));
+     };
+     const auto offset = random() % adjacent.size();
+     for (unsigned i = 0; i < adjacent.size(); ++i) {
+@@ -458,6 +460,15 @@
+         if (occupant < 0) {
+             if (destination < 0 || forage_value(candidate) > forage_value(destination)) {
+                 destination = candidate;
++            }
++            if (!food_web_ && predation_ && cells_[candidate].moisture >= 64) {
++                for (int beyond : neighbors(candidate)) {
++                    if (beyond >= 0 && beyond != creature.cell && occupants_[beyond] >= 0 &&
++                        creatures_[occupants_[beyond]].energy < nearest_prey_energy) {
++                        nearest_prey_energy = creatures_[occupants_[beyond]].energy;
++                        close_pursuit_step = candidate;
++                    }
++                }
+             }
+         } else if (predation_ && !adaptive_hunts_ &&
+                    !(creatures_[occupant].nest_ticks && creatures_[occupant].has_parent(creature.id))) {
+@@ -549,6 +560,14 @@
+                 }
+             }
+         }
++        if (!food_web_ && close_pursuit_step >= 0 && creature.energy > 10) {
++            const int reserve = nearest_prey_energy * meat_digestion / 24;
++            const int gain = std::min(body_mass, bite_limit) * meat_digestion * 2 / 10 + reserve;
++            const int score = std::clamp(60 - nearest_prey_energy / 3, 15, 55) * gain;
++            if (score > 180 * (attack_cost + meal(origin) + 1)) {
++                hunt_step = close_pursuit_step;
++            }
++        }
+         if (observer.record_hunt_decision && predation_) {
+             if (hunting_chance > 0) {
+                 decision = HuntDecision::strike;
+@@ -583,7 +603,7 @@
+         if (landed) {
+             auto& prey = creatures_[prey_slot];
+             const auto prey_cell = prey.cell;
+-            captured_energy = food_web_ ? recovered_energy(prey.energy) : 0;
++            captured_energy = food_web_ ? recovered_energy(prey.energy) : prey.energy * meat_digestion / 24;
+             metrics_.nests.killed += prey.nest_ticks > 0;
+             if (observer.record_kill) {
+                 observer.record_kill(observer.context, creature, prey);
+@@ -597,8 +617,8 @@
+         }
+     } else if (hunt_step >= 0) {
+         creature.cell = hunt_step;
+-        chase_paid = move_cost;
++        chase_paid = food_web_ ? move_cost : 1;
+         cost += chase_paid;
+     } else if (destination >= 0 &&
+                (seeking_food || forage_value(destination) > forage_value(origin) ||
+                 (connected_biomes_ && creature.energy < 85 && cells_[destination].moisture >= 32 &&
