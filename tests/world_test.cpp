@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -745,6 +746,49 @@ void detritus_limit() {
     check(!restored.load_checkpoint(concentrate(petri::Cell::max_detritus + 1u)), "Detritus overflow was accepted");
 }
 
+void checkpoint_streams() {
+    // Streamed chunks equal the array encoding, and an in-place load equals a staged one.
+    petri::World original(4, petri::Config{80, true, 1, 0, true, true, false, false, true, true, true, true});
+    for (int tick = 0; tick < 700; ++tick) {
+        original.step();
+    }
+    petri::Checkpoint whole{};
+    original.save_checkpoint(whole);
+    std::vector<std::uint8_t> streamed;
+    std::size_t largest_chunk = 0;
+    struct Collect {
+        std::vector<std::uint8_t>& bytes;
+        std::size_t& largest;
+    } collect{streamed, largest_chunk};
+    const auto total = original.save_checkpoint([](void* context, const std::uint8_t* data, std::size_t size) {
+        auto& c = *static_cast<Collect*>(context);
+        c.bytes.insert(c.bytes.end(), data, data + size);
+        c.largest = std::max(c.largest, size);
+    }, &collect);
+    check(total == whole.size() && streamed.size() == whole.size() &&
+              std::equal(streamed.begin(), streamed.end(), whole.begin()),
+          "Streamed checkpoint differs from the array encoding");
+    check(largest_chunk <= 256, "A checkpoint chunk exceeded 256 bytes");
+
+    petri::World staged(1), in_place(99, petri::Config{48, true, 1, 0, true});
+    check(staged.load_checkpoint(whole), "Staged load rejected a valid checkpoint");
+    check(in_place.load_checkpoint_in_place(whole.data(), whole.size()), "In-place load rejected a valid checkpoint");
+    check(staged.fingerprint() == in_place.fingerprint(), "In-place load differs from staged load");
+    petri::Checkpoint again{};
+    in_place.save_checkpoint(again);
+    check(again == whole, "In-place load did not re-encode identically");
+    for (int tick = 0; tick < 300; ++tick) {
+        staged.step();
+        in_place.step();
+    }
+    check(staged.fingerprint() == in_place.fingerprint(), "Worlds diverged after an in-place load");
+    auto damaged = whole;
+    damaged[100] ^= 1;
+    petri::World rejected(1);
+    check(!rejected.load_checkpoint_in_place(damaged.data(), damaged.size()), "In-place load accepted a bad checksum");
+    check(!rejected.load_checkpoint_in_place(whole.data(), whole.size() - 1), "In-place load accepted a short buffer");
+}
+
 double mean_digestion(const petri::World& world) {
     unsigned total = 0;
     for (const auto& creature : world.creatures()) {
@@ -836,6 +880,7 @@ int main() {
     fruiting_plants();
     checkpoint_replay();
     detritus_limit();
+    checkpoint_streams();
     selection_scenarios();
     life_frame();
 }

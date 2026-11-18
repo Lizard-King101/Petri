@@ -1,6 +1,6 @@
 # Petri dual-processor architecture
 
-**Status:** Design decision, November 18, 2026. Stages 1 through 5 are done;
+**Status:** Design decision, November 18, 2026. Stages 1 through 7 are done (the stage 7 soak is deferred);
 the rest is not implemented yet. Values marked *verify* are unconfirmed on
 this board.
 
@@ -53,16 +53,23 @@ Each chip gets one coherent job.
 
 ## Ownership
 
+Decided November 18, 2026: the ESP32 runs the biology, and the SAMD51 is the
+graphics processor. The ESP32 streams compact render state, not pixels. The
+SAMD51 keeps a small mirror of that state and draws every frame itself.
+
 ```text
                 ESP32 core 1                      ESP32 core 0
           ┌──────────────────────┐   ┌──────────────────────────────────┐
-          │ World::step()        │──▶│ Panel render (existing panel.cpp)│
+          │ World::step()        │──▶│ render-state encoder             │
           │ simulation only;     │   │ link task (SPI slave, DMA)       │
           │ no flash, no radio   │   │ BLE control service (NimBLE)     │
           └──────────────────────┘   │ checkpoint serializer            │
+                                     │ later: share of environment work │
                                      └───────────────┬──────────────────┘
-                                                     │ SPI + BUSY handshake
+                                                     │ SPI, 8 MHz, mode 0
                     SAMD51 ┌─────────────────────────▼──────────────────┐
+                           │ render mirror and decoder                  │
+                           │ Panel renderer, camera, animation          │
                            │ Protomatter scanout (double buffered)      │
                            │ buttons, LIS3DH, NeoPixel                  │
                            │ QSPI: rotating checkpoints, history log    │
@@ -72,24 +79,92 @@ Each chip gets one coherent job.
 
 - **ESP32 core 1** runs only the simulation. It never touches flash or the
   radio, so Bluetooth traffic and flash stalls cannot change the biology.
-- **ESP32 core 0** runs the existing `Panel` renderer from `const World&` and
-  the step observer. ESP-IDF runs the radio stack on core 0 by default.
-  Native rendering costs about 0.05 ms per frame, so rendering at 20 fps is a
-  small share of this core.
-- **SAMD51** displays finished 64×32 RGB565 frames. It sends button,
-  accelerometer, and camera commands, and it stores checkpoints. Rendering on
-  the ESP32 keeps `panel.cpp` unchanged and avoids mirroring world state on
-  the SAMD51. A 4 KiB frame at 20 fps is 80 KiB/s on the link.
+- **ESP32 core 0** turns the world into render state at tick boundaries and
+  runs the link, BLE, and checkpoint transfers. ESP-IDF runs the radio stack
+  here by default. Freed from rendering, this core can later take a
+  deterministic share of the per-cell environment work.
+- **The SAMD51 renders.** Without the simulation, its full CPU and about
+  150 KB of RAM go to graphics. The close view takes 10.5 ms per frame there,
+  so 30–60 fps is within reach before any optimization. The camera, auto
+  follow, and animation timing live here. They are presentation only and
+  never feed back into the biology. Buttons and camera commands still reach
+  the ESP32 at tick boundaries when they change the world, such as pause and
+  speed.
+- **If the ESP32 stalls or restarts,** the SAMD51 keeps animating its last
+  mirror.
 - **Checkpoints live on the SAMD51 QSPI flash**, so the living world survives
   ESP32 reflashing. ESP32 flash writes would also stall both ESP32 cores.
   The plan uses rotating slots with the existing FNV-1a checksum and keeps the
   last known good slot. Four slots of a roughly 90 KiB wide checkpoint use
   about 360 KiB, leaving most of the 2 MiB for a bounded event and lineage log.
-  At boot, the ESP32 asks the SAMD51 for the newest valid slot.
+  Every SAMD51 reset also restarts the ESP32, so after a reset the SAMD51
+  sends the newest valid slot back over the link: about 22 frames, roughly
+  0.13 s.
 - **One radio: Bluetooth LE.** Wi-Fi is never initialized, and the memory
   reserved for classic Bluetooth is released at boot. The NimBLE stack is
-  used because it is smaller than Bluedroid. The real RAM cost is measured
-  in stage 4.
+  used because it is smaller than Bluedroid. Stage 4 measured its cost.
+
+## Render state
+
+Implemented natively in stage 6 (`render/render_state.hpp`,
+`render/render_stream.hpp`). The ESP32 and SAMD51 halves join at cutover.
+
+- **The renderer reads only `RenderState`.** `Panel` draws one 3-byte
+  `RenderCell` per cell, one `RenderCreature` per slot, and the `RenderEvent`s
+  since the last update. `LocalPanel` wraps a `World` on the same chip and keeps
+  its own state captured, so the native tools and the SAMD51-only firmware use
+  the same renderer.
+- **Render cell, 3 bytes.** It holds the biome, moisture in 16 levels, a
+  carcass flag, exact plants, detritus capped at 16, and shrub and fruit
+  state. Every value the renderer used is exact except moisture. Before
+  moisture was quantized, all 16,200 frames of a scripted run matched the old
+  World-based renderer byte for byte, across both world sizes and every view.
+  After quantization the 64×32 build is still identical. The 128×64 build
+  differs in 0.15–0.57% of pixels, at most 38 of 2,048 per frame, all from the
+  life view's 2×2 moisture average and the soil tint.
+- **Creatures carry phenotype.** `Look` packs diet shape, body color,
+  detail-sprite back height, and faction into 16 bits, and `look_of(Genome)`
+  computes it. A creature record is slot, id, cell, and look: 9 bytes.
+- **Events** are hunts (with the prey cell's wetness), meals, attacks, and
+  deaths. They are recorded during `World::step` in order, 18 bytes each.
+- **The stream.** Each update is a sequence of records in payloads of up to
+  4,096 bytes, and no record spans two payloads:
+  - an update header;
+  - the complete creature list;
+  - the events;
+  - runs of changed cells, merging single unchanged cells;
+  - a rolling refresh of 128 cells;
+  - an end record with an FNV-1a checksum of the encoder's shadow map.
+  The encoder keeps a 24 KB shadow and computes cells on the fly. Cells that
+  do not fit the payload budget stay pending. The decoder rejects malformed
+  records and counts checksum mismatches.
+- **Measured** on the observatory world, 300 updates each:
+
+  | Ticks per update | Mean bytes | Max bytes | At 20 updates/s |
+  | ---: | ---: | ---: | ---: |
+  | 1 | 3,634 | 4,775 | 73 KB/s, 10% of the link |
+  | 4 | 8,668 | 9,577 | 173 KB/s, 24% |
+  | 12 | 12,068 | 13,177 | 241 KB/s, 33% |
+
+- **Verified** by `tests/render_stream_test.cpp` in both world sizes:
+  - Without loss, the mirror equals the world's render state after every
+    update, and the decoded events match the recorded ones.
+  - 2,700 frames drawn from the mirror match `LocalPanel` exactly.
+  - With one payload per update, the 128×64 mirror caught up 6 updates
+    after stepping stopped.
+  - With every third payload dropped, the checksum flagged damage, and one
+    refresh cycle (65 updates) repaired the mirror.
+  - Truncated, unknown, and random payloads are rejected without crashing.
+- **SAMD51-only firmware.** The board runs the LocalPanel build
+  (`petri-observatory-mirror.uf2`). Static RAM is 132,888 bytes, up 28 KB for
+  the mirror and event log. 50,828 bytes remain free between heap and stack
+  after the display allocates. Cutover removes the 72.7 KB world from the
+  SAMD51.
+- **Still to do at cutover:**
+  - Measure encode time on ESP32 core 0 and decode time on the SAMD51.
+  - Choose the update rate.
+  - Carry companion inspector data (parents, generation, energy, intake),
+    which the PTR4 observation still reads from `World`.
 
 ## Link protocol
 
@@ -125,8 +200,8 @@ timing.
   SAMD51 can produce. Both sides use these values from reset. A hardware
   reset clears the ESP32's RTC memory, so no link setting may depend on
   remembered ESP32 state.
-- **Bandwidth.** 176 frames/s, 721 KB/s of payload each way. A 4 KiB panel
-  frame at 20 frames/s uses about 11% of the link.
+- **Bandwidth.** 176 frames/s, 721 KB/s of payload each way. The render
+  state stream is budgeted under Render state.
 - **Recovery.** After an ESP32 hardware reset or software restart, frames
   resume in 291 ms or 310 ms. The SAMD51 keeps showing the last frame and
   sets a status color on the NeoPixel until frames return.
@@ -137,7 +212,7 @@ timing.
   therefore its latest checkpoint. The SAMD51 firmware should drive reset high
   early, and it should request a checkpoint before any planned restart or
   update.
-- Packet types still to add: frame, camera and input command, telemetry,
+- Packet types still to add: render state, camera and input command, telemetry,
   checkpoint chunk and acknowledgment, history record, and hello notices.
   Where possible, their bodies reuse the `PTR4` observation and `PanelInput`
   formats, so the same messages travel over USB, BLE, and the link.
@@ -212,17 +287,88 @@ Each stage ends with something measured on hardware or checked by a test.
    errors in either direction while the observatory world ran on core 1 at
    207–268 ticks/s. Recovery and the reset-line finding are under Link
    protocol.
-6. **Cutover.** Make the ESP32 world authoritative, display streamed frames,
-   save checkpoints to QSPI, and relay companion USB traffic. Run a
-   multi-hour soak and a power-cut test.
-7. **BLE.** Add the GATT control and telemetry service, bonding, and the
+6. **Render-state stream.** *Done.* The formats, encoder, decoder, and
+   mirror are in `render/`, and `Panel` draws only from the mirror. Tests and
+   measurements are under Render state; on-chip timing is under stage 7.
+7. **Cutover.** *Done, except the multi-hour soak, which is deferred.* The
+   world, the stream, controls, QSPI checkpoints, restore after a reset, and a
+   power cut are verified on the board. A 10-minute run at 8 ticks/s advanced
+   from tick 441 to 5,372, made one scheduled save (1,568 ms), and had no new
+   stream, link, or checksum errors. ESP32 heap held at 127,976 bytes, and the
+   final fingerprint matched native.
+   - `esp32` built with `sdkconfig.defaults.world` runs the observatory world
+     on core 1. Between steps it encodes render updates, at most one per
+     30 ms plus one per second while paused. It sends telemetry and a creature
+     census once a second. Core 0 runs the SPI slave and applies speed
+     commands.
+   - `firmware/petri_display` (`--display`) is the SAMD51 half. It holds no
+     `World`: only the mirror, the `Panel`, the census details, and the
+     companion's PTR4 observation built from them.
+   - Variable-length transfers: the SAMD51 clocks both 16-byte headers, then
+     only the longer payload, so an idle poll costs microseconds.
+   - On the board, the ESP32's fingerprints matched native at ticks 266–268,
+     342, 356 (paused), and 382, across 1 and 8 ticks/s and a pause. The SAMD51
+     drew 20 fps and received 8 updates/s at 8 ticks/s. Pause held the tick
+     while the 1-per-second update continued.
+   - Measured costs:
+     - ESP32 encode: 4.8 ms per update, on core 1, about the same as one step.
+     - SAMD51: up to 3.7 ms to decode a payload, and up to 19 ms to draw a
+       close-view frame and push it to the panel.
+     - Free memory: 105 KB on the SAMD51 (heap to stack); 128 KB of ESP32 heap,
+       and never below 119 KB.
+   - The SAMD51 counted 56 invalid frames while the ESP32 booted: its ready
+     line floats before the SPI slave starts. They stop once the slave runs.
+   - `World::save_checkpoint(ChunkSink)` streams a checkpoint in chunks of up
+     to 256 bytes, and `World::load_checkpoint_in_place` decodes without a
+     staging copy. The array encoding is now built from the stream, and all
+     180 baseline checkpoints are unchanged.
+   - **Checkpoints** (`firmware/checkpoint_store.hpp`):
+     - **Layout.** The QSPI flash holds four rotating 96 KiB slots, and the
+       old CIRCUITPY drive was given up for them; its files are in `backups/`.
+       A save erases each sector just before writing it, writes the data from
+       byte 256, and reads it back. Only then does it program a 32-byte header
+       (magic, sequence, size, tick, data CRC, header CRC) into the
+       still-erased start. The newest valid slot is never overwritten.
+     - **Boot handshake.** The ESP32 flags `awaiting_world` until the SAMD51
+       either sends `start_fresh` or restores the newest valid slot. A
+       restore is `restore_begin`, about 22 chunks, and `restore_end` with a
+       CRC. The ESP32 allocates its 90 KB restore buffer before the payload
+       pool, decodes in place, falls back to a fresh world on any failure,
+       and then frees the buffer.
+     - **Saves.** The SAMD51 asks for one every 10 minutes, or on `S` over
+       USB. The ESP32 streams it at the next tick boundary after any due step.
+       A save takes 1.5–1.7 s, and the panel drops to 11–15 fps while sectors
+       erase.
+     - **Verified on the board:**
+       - With no valid slot, the first boot started fresh.
+       - A reset restored the newest slot.
+       - After `X` corrupted the newest slot, a reset fell back to the older
+         one.
+       - SAMD51 resets 0.3 s and 0.8 s into a save restored the previous slot.
+         A reset at 1.2 s came after the save had finished.
+       - In a real power cut during back-to-back saves (`C`), the next boot
+         restored a complete slot.
+       - Every restored world matched native fingerprints, at ticks 265, 268,
+         279, 282, 403, 406, and 409.
+   - **Static DRAM is the next constraint.** The world app uses 115,692 of
+     180,736 bytes of static DRAM. With Bluetooth the segment shrinks to
+     124,580 bytes, which would leave about 9 KB. The BLE stage must move the
+     `World` and the encoder shadow to the heap, which spans other regions.
+     The self-test already does, so its BLE build fits.
+8. **Graphics pass on the SAMD51.** Measure Protomatter color depth (5–6
+   bitplanes), achievable frame rate, and interpolation smoothness. Then pick
+   among day/night lighting, weather particles, animated water, and cached
+   procedural sprites per zoom level.
+9. **BLE.** Add the GATT control and telemetry service, bonding, and the
    phone app.
+10. **Ecology.** Make the full-grid environment passes cheaper; `recycle` runs
+    on about 4,096 cells each tick. Try a deterministic share of them on
+    core 0. Then add evolvable fixed-topology int8 neural controllers, costed
+    body traits, plant genetics, dormant eggs, and compatibility-based
+    speciation.
 
 World compaction is done (November 18, 2026): the wide `World` is
 72,664 bytes, down from 109,008. See the README's memory layout section.
-After cutover, the ecology roadmap uses the ESP32 core 1 budget: evolvable
-fixed-topology int8 neural controllers, costed body traits, plant genetics,
-dormant eggs, and compatibility-based speciation.
 
 ## Options kept open
 
@@ -232,4 +378,4 @@ dormant eggs, and compatibility-based speciation.
   only after cutover is stable.
 - **Simulation on both ESP32 cores.** Environment cells could update on core 0
   while creatures update on core 1, with double buffering to keep the result
-  deterministic. Attempt this only if core 1 becomes the bottleneck.
+  deterministic. This is part of stage 10.

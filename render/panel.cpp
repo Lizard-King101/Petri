@@ -29,10 +29,9 @@ constexpr std::uint32_t terrain_pattern(unsigned cell) {
     return value ^ (value >> 16);
 }
 
-std::uint16_t body_color(const World& world, const Genome& genes) {
+std::uint16_t body_color(bool connected_biomes, Look look) {
     constexpr std::array colors{rgb565(208, 96, 48), rgb565(208, 160, 48), rgb565(112, 192, 112)};
-    return world.connected_biomes() ? colors[static_cast<unsigned>(biome_at(genes.preferred_moisture()))]
-                                   : creature_tint(world);
+    return connected_biomes ? colors[static_cast<unsigned>(look.body())] : creature_tint(connected_biomes);
 }
 
 } // namespace
@@ -74,59 +73,63 @@ void Panel::cycle_view(std::uint32_t now_ms) {
     auto_follow_ = next == PanelView::close;
 }
 
-StepObserver Panel::before_step(std::uint32_t now_ms) {
+void Panel::begin_update(std::uint32_t now_ms) {
     now_ms_ = now_ms;
     for (std::size_t slot = 0; slot < previous_.size(); ++slot) {
-        const auto& creature = world_.creatures()[slot];
+        const auto& creature = state_.creatures[slot];
         previous_[slot] = {creature.id, creature.cell};
     }
-    return {this, nullptr,
-        [](void* panel, std::uint16_t, std::uint16_t prey) {
-            static_cast<Panel*>(panel)->mark_hunt(prey);
-        },
-        [](void* panel, const Creature& creature, bool meat) {
-            static_cast<Panel*>(panel)->mark_meal(creature, meat);
-        }, nullptr, nullptr, nullptr,
-        [](void* panel, const Creature& attacker, const Creature& target, bool landed) {
-            static_cast<Panel*>(panel)->mark_attack(attacker, target, landed);
-        },
-        [](void* panel, const Creature& creature, DeathCause cause) {
-            static_cast<Panel*>(panel)->mark_death(creature, cause);
-        }};
 }
 
-void Panel::after_step(std::uint32_t now_us, std::uint32_t interval) {
+void Panel::apply(const RenderEvent& event) {
+    switch (event.kind) {
+    case RenderEvent::Kind::hunt:
+        mark_hunt(event.flag);
+        break;
+    case RenderEvent::Kind::meal:
+        mark_meal(event.first.id, event.flag);
+        break;
+    case RenderEvent::Kind::attack:
+        mark_attack(event.first, event.second, event.flag);
+        break;
+    case RenderEvent::Kind::death:
+        mark_death(event.first, event.flag);
+        break;
+    }
+}
+
+void Panel::end_update(std::uint32_t now_us, std::uint32_t interval) {
     motion_start_ = now_us;
     motion_duration_ = std::min<std::uint32_t>(550000, interval * 4 / 5);
 }
 
-void Panel::mark_hunt(std::uint16_t prey) {
+void Panel::mark_hunt(bool wet) {
     if (camera_.view == PanelView::hunt && !hunt_.active && now_ms_ - hunt_.quiet_since >= hunt_quiet) {
-        hunt_.wet = world_.cells()[prey].moisture >= 64;
+        hunt_.wet = wet;
         hunt_.started_at = now_ms_;
         hunt_.active = true;
     }
 }
 
-void Panel::mark_meal(const Creature& creature, bool meat) {
-    if (creature.id == camera_.follow) {
+void Panel::mark_meal(std::uint64_t id, bool meat) {
+    if (id == camera_.follow) {
         subject_.ate_at = now_ms_;
         subject_.fed = true;
         subject_.meat = meat;
     }
 }
 
-Panel::Actor Panel::capture_actor(const Creature& creature) const {
+Panel::Actor Panel::capture_actor(const RenderActor& creature) const {
     const auto previous = std::find_if(previous_.begin(), previous_.end(), [&](const Previous& actor) {
         return actor.id == creature.id;
     });
     const bool right = creature.id == camera_.follow ? subject_.face_right
         : previous == previous_.end() || creature.cell % width >= previous->cell % width;
-    return {creature.id, creature.cell, creature.genes, right};
+    return {creature.id, creature.cell, creature.look, right};
 }
 
-Panel::LifeEvent* Panel::start_event(const Creature& target, const Creature* attacker) {
-    const auto visible = [&](const Creature& creature) {
+Panel::LifeEvent* Panel::start_event(const RenderActor& target, const RenderActor* attacker) {
+    const auto visible = [&](const RenderActor& creature) {
         const int tile = camera_.zoom ? 1 << (camera_.zoom - 1) : 1;
         const auto origin = cell_origin(creature.cell, tile);
         const int x = origin[0] - camera_.left;
@@ -153,7 +156,7 @@ Panel::LifeEvent* Panel::start_event(const Creature& target, const Creature* att
     return &*slot;
 }
 
-void Panel::mark_attack(const Creature& attacker, const Creature& target, bool landed) {
+void Panel::mark_attack(const RenderActor& attacker, const RenderActor& target, bool landed) {
     auto same = std::find_if(events_.begin(), events_.end(), [&](const LifeEvent& event) {
         return event.active && !event.dead && event.attacker.id == attacker.id && event.target.id == target.id &&
             now_ms_ - event.started_at < attack_action;
@@ -168,8 +171,8 @@ void Panel::mark_attack(const Creature& attacker, const Creature& target, bool l
     }
 }
 
-void Panel::mark_death(const Creature& creature, DeathCause cause) {
-    if (cause == DeathCause::predation) {
+void Panel::mark_death(const RenderActor& creature, bool predation) {
+    if (predation) {
         return;
     }
     if (auto* event = start_event(creature, nullptr)) {
@@ -209,13 +212,6 @@ void Panel::fill(int x, int y, int w, int h, std::uint16_t color) {
     for (int row = std::max(0, y); row < bottom; ++row) {
         std::fill_n(frame_.begin() + row * panel_width + left, right - left, color);
     }
-}
-
-Panel::DietShape Panel::diet_shape(const Genome& genes) {
-    if (genes.meat_digestion() >= 10) {
-        return DietShape::meat;
-    }
-    return genes.digestion >= 10 ? DietShape::plant : DietShape::mixed;
 }
 
 void Panel::sprite(int x, int y, int scale, DietShape diet, bool face_right,
@@ -262,7 +258,7 @@ void Panel::sprite(int x, int y, int scale, DietShape diet, bool face_right,
     }
 }
 
-void Panel::detail_sprite(int x, int y, const Genome& genes, bool face_right,
+void Panel::detail_sprite(int x, int y, Look look, bool face_right,
                           bool stride, bool eating, std::uint16_t body, int height) {
     constexpr int tile = 16;
     const auto part = [&](int col, int row, int w, int h, std::uint16_t color) {
@@ -272,8 +268,8 @@ void Panel::detail_sprite(int x, int y, const Genome& genes, bool face_right,
     const auto shade = dim(body);
     constexpr auto nose = rgb565(32, 24, 32);
     const auto eye = height == tile ? eye_color : dim(body);
-    const int back = 7 - (Genome::maximum - genes.thrift) / 5;
-    const auto diet = diet_shape(genes);
+    const int back = look.back();
+    const auto diet = look.shape();
 
     // Draw the far legs behind the body and the near legs over the belly.
     part(5 + int(stride), 10, 2, 4, shade);
@@ -287,8 +283,8 @@ void Panel::detail_sprite(int x, int y, const Genome& genes, bool face_right,
     part(9 + int(stride), 14, 3, 1, body);
 
     // Coat markings share the inherited faction marker used by hunting.
-    const auto coat = coat_colors[genes.faction];
-    switch (genes.faction) {
+    const auto coat = coat_colors[look.faction()];
+    switch (look.faction()) {
     case 1:
         part(5, back + 1, 1, 3, coat);
         part(7, back + 1, 1, 3, coat);
@@ -348,7 +344,7 @@ void Panel::draw_hunt() {
         hunt_.quiet_since = now_ms_;
     }
     if (!hunt_.active) {
-        render_life(world_, frame_, false);
+        render_life(state_, frame_, false);
         for (auto& color : frame_) {
             color = (color & 0xe79c) >> 2;
         }
@@ -381,7 +377,7 @@ void Panel::draw_hunt() {
 }
 
 std::array<int, 2> Panel::position(std::size_t slot, int tile, std::uint32_t elapsed) const {
-    const auto& creature = world_.creatures()[slot];
+    const auto& creature = state_.creatures[slot];
     const auto& previous = previous_[slot];
     const int from = previous.id == creature.id ? previous.cell : creature.cell;
     const auto old_origin = cell_origin(from, tile);
@@ -423,10 +419,10 @@ std::array<int, 2> Panel::position(std::size_t slot, int tile, std::uint32_t ela
 }
 
 void Panel::update_camera(int tile, std::uint32_t elapsed, unsigned speed_index) {
-    const auto& creatures = world_.creatures();
+    const auto& creatures = state_.creatures;
     const auto find = [&](std::uint64_t id) {
         return id ? std::find_if(creatures.begin(), creatures.end(),
-            [id](const Creature& creature) { return creature.id == id; }) : creatures.end();
+            [id](const RenderCreature& creature) { return creature.id == id; }) : creatures.end();
     };
     auto subject = find(camera_.follow);
     const auto old_follow = camera_.follow;
@@ -537,9 +533,9 @@ void Panel::update_camera(int tile, std::uint32_t elapsed, unsigned speed_index)
 }
 
 void Panel::plant_sprite(int x, int y, int tile, int index) {
-    const auto& cell = world_.cells()[index];
-    const auto fruit = world_.fruit_at(index);
-    const bool shrub = world_.fruiting_shrub(index);
+    const auto& cell = state_.cells[index];
+    const auto fruit = cell.fruit();
+    const bool shrub = cell.shrub();
     struct Colors { std::uint16_t stem, leaf, tip; };
     constexpr std::array colors{
         Colors{rgb565(104, 72, 28), rgb565(96, 128, 48), rgb565(152, 160, 72)},
@@ -547,7 +543,7 @@ void Panel::plant_sprite(int x, int y, int tile, int index) {
         Colors{rgb565(40, 88, 64), rgb565(56, 144, 104), rgb565(156, 160, 80)},
     };
     constexpr Colors shrub_colors{rgb565(96, 56, 24), rgb565(64, 144, 56), rgb565(112, 176, 72)};
-    const auto biome = biome_at(cell.moisture);
+    const auto biome = cell.biome();
     const auto [stem, leaf, tip] = shrub ? shrub_colors : colors[static_cast<unsigned>(biome)];
     if (tile == 4) {
         // The plant sits below the creature and to the right of any carrion.
@@ -640,7 +636,7 @@ void Panel::plant_sprite(int x, int y, int tile, int index) {
 
 std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
     int owner = y / tile * width + x / tile;
-    if (world_.connected_biomes()) {
+    if (state_.connected_biomes) {
         const int col = (x + tile / 2) / tile - 1;
         const int row = (y + tile / 2) / tile - 1;
         const int u = (x + tile / 2) % tile, v = (y + tile / 2) % tile;
@@ -649,8 +645,8 @@ std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
         };
         const std::array<int, 4> cells{index(0, 0), index(1, 0), index(0, 1), index(1, 1)};
         const std::array<Biome, 4> corners{
-            biome_at(world_.cells()[cells[0]].moisture), biome_at(world_.cells()[cells[1]].moisture),
-            biome_at(world_.cells()[cells[2]].moisture), biome_at(world_.cells()[cells[3]].moisture),
+            state_.cells[cells[0]].biome(), state_.cells[cells[1]].biome(),
+            state_.cells[cells[2]].biome(), state_.cells[cells[3]].biome(),
         };
         const auto biome = dual_terrain(corners, u, v, tile, col, row);
         int best = 8 * tile * tile;
@@ -664,16 +660,15 @@ std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
             }
         }
     }
-    const auto& cell = world_.cells()[owner];
+    const auto& cell = state_.cells[owner];
     const auto origin = cell_origin(owner, tile);
     const auto pattern = terrain_pattern(owner);
     const int u = x - origin[0], v = y - origin[1];
     const int feature_x = (pattern >> 8) % tile;
     const int feature_y = (pattern >> 16) % tile;
     const int cover = cell.plants / 3;
-    auto color = world_.connected_biomes() ? biome_tint(cell.moisture, cover)
-        : rgb565(8 + std::min<std::uint32_t>(16, cell.detritus) * 3,
-                 8 + std::min(184, cover * 8), 8 + cell.moisture / 8);
+    auto color = state_.connected_biomes ? biome_tint(cell.biome(), cover)
+        : rgb565(8 + cell.detritus() * 3, 8 + std::min(184, cover * 8), 8 + cell.moisture() / 8);
     int shade = 0;
     if (tile >= 8 && (pattern & 1) && std::abs(u - feature_x) + 2 * std::abs(v - feature_y) <= tile / 4) {
         shade = -1;
@@ -682,7 +677,7 @@ std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
         shade = 1;
     }
     if (shade) {
-        const auto biome = biome_at(cell.moisture);
+        const auto biome = cell.biome();
         const int red = std::clamp(int(color >> 11) + 2 * shade, biome == Biome::scrub ? 4 : 0, 31);
         const int green = std::clamp(int((color >> 5) & 63) + (biome == Biome::scrub && shade < 0 ? 0 : 4 * shade),
                                    biome == Biome::scrub ? 4 : 0, 63);
@@ -701,29 +696,28 @@ void Panel::draw_environment(int tile) {
         }
     }
     const int last_y = (camera_.top + panel_height - 1) / tile;
-    const bool connected = world_.connected_biomes();
+    const bool connected = state_.connected_biomes;
     for (int y = camera_.top / tile; y <= last_y; ++y) {
         const int first_x = camera_.left / tile;
         const int last_x = (camera_.left + panel_width - 1) / tile;
         for (int x = first_x; x <= last_x; ++x) {
             const int index = y * width + x;
-            const auto& cell = world_.cells()[index];
+            const auto& cell = state_.cells[index];
             const int px = x * tile - camera_.left;
             const int py = y * tile - camera_.top;
             if (tile < 4) {
-                const auto terrain = connected ? biome_tint(cell.moisture, cell.plants)
-                    : rgb565(8 + std::min<std::uint32_t>(16, cell.detritus) * 3,
-                             8 + std::min(184, cell.plants * 8), 8 + cell.moisture / 8);
+                const auto terrain = connected ? biome_tint(cell.biome(), cell.plants)
+                    : rgb565(8 + cell.detritus() * 3, 8 + std::min(184, cell.plants * 8), 8 + cell.moisture() / 8);
                 fill(px, py, tile, tile, terrain);
             }
-            if (tile >= 4 && (cell.plants || world_.fruit_at(index))) {
+            if (tile >= 4 && (cell.plants || cell.fruit())) {
                 plant_sprite(px, py, tile, index);
             }
-            const bool collapsing = cell.animal && std::any_of(events_.begin(), events_.end(), [&](const LifeEvent& event) {
+            const bool collapsing = cell.carcass() && std::any_of(events_.begin(), events_.end(), [&](const LifeEvent& event) {
                 return event.active && event.dead && event.target.cell == index &&
                     now_ms_ - event.started_at < collapse_time + (event.attacker.id ? attack_impact : 0);
             });
-            if (cell.animal && !collapsing) {
+            if (cell.carcass() && !collapsing) {
                 if (tile >= 8) {
                     const int scale = tile / 8;
                     fill(px + 2 * scale, py + 5 * scale, 4 * scale, 2 * scale, carrion_color);
@@ -752,16 +746,16 @@ void Panel::draw_deaths(int tile) {
         if (fallen_for < collapse_time) {
             const int full_height = tile == 8 ? 7 : 16;
             const int height = interpolate_axis(full_height, tile / 3, fallen_for, collapse_time);
-            const auto color = body_color(world_, actor.genes);
+            const auto color = body_color(state_.connected_biomes, actor.look);
             const auto fading = fallen_for < collapse_time / 2 ? color : dim(color);
             if (tile == 16) {
-                detail_sprite(px, py, actor.genes, actor.face_right, false, false, fading, height);
+                detail_sprite(px, py, actor.look, actor.face_right, false, false, fading, height);
             } else {
-                sprite(px, py, 1, diet_shape(actor.genes), actor.face_right, false, false,
-                       fading, actor.genes.faction, height);
+                sprite(px, py, 1, actor.look.shape(), actor.face_right, false, false,
+                       fading, actor.look.faction(), height);
             }
         } else {
-            const bool remains = world_.cells()[actor.cell].animal != 0;
+            const bool remains = state_.cells[actor.cell].carcass();
             const int scale = tile / 8;
             const auto left = death_visible - age;
             const int w = remains ? 4 * scale : std::max(1, int(left * 4 * scale / (death_visible - collapse_time - delay)));
@@ -793,14 +787,14 @@ void Panel::draw_contact(int tile) {
 
 void Panel::draw_grid(bool show_creatures, int tile, std::uint32_t elapsed) {
     if (camera_.zoom == 0) {
-        render_life(world_, frame_, show_creatures);
+        render_life(state_, frame_, show_creatures);
     } else {
         draw_environment(tile);
     }
     if (!show_creatures) {
         return;
     }
-    const auto& creatures = world_.creatures();
+    const auto& creatures = state_.creatures;
     const int offset = tile == 4 ? 1 : 0;
     PanelPoint followed;
     for (std::size_t slot = 0; slot < creatures.size(); ++slot) {
@@ -819,10 +813,11 @@ void Panel::draw_grid(bool show_creatures, int tile, std::uint32_t elapsed) {
         locations_[slot] = {static_cast<std::int8_t>(std::min(x, panel_width - 1)),
                             static_cast<std::int8_t>(std::min(y, panel_height - 1))};
         if (camera_.zoom) {
-            const auto color = tile == 1 ? creature_tint(world_) : body_color(world_, creature.genes);
+            const auto color = tile == 1 ? creature_tint(state_.connected_biomes)
+                                         : body_color(state_.connected_biomes, creature.look);
             fill(x - offset, y - offset, offset + 1, offset + 1, color);
-            if (tile == 4 && creature.genes.faction) {
-                pixel(x - offset, y - offset, coat_colors[creature.genes.faction]);
+            if (tile == 4 && creature.look.faction()) {
+                pixel(x - offset, y - offset, coat_colors[creature.look.faction()]);
             }
         }
         if (tile == 1 && creature.id == camera_.follow) {
@@ -841,7 +836,7 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
 
     const bool eating = subject_.fed && now_ms_ - subject_.ate_at < meal_visible;
     const bool stride = now_ms_ - subject_.moved_at < 200 && (now_ms_ / 85) % 2;
-    const auto& creatures = world_.creatures();
+    const auto& creatures = state_.creatures;
     for (std::size_t slot = 0; slot < creatures.size(); ++slot) {
         const auto& creature = creatures[slot];
         if (!creature.alive()) {
@@ -856,7 +851,7 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
         locations_[slot] = {static_cast<std::int8_t>(std::clamp(px + tile / 2, 0, panel_width - 1)),
                             static_cast<std::int8_t>(std::clamp(py + tile / 2, 0, panel_height - 1))};
         const bool tracked = creature.id == camera_.follow;
-        const auto color = body_color(world_, creature.genes);
+        const auto color = body_color(state_.connected_biomes, creature.look);
         const auto& previous = previous_[slot];
         const bool moved = previous.id == creature.id && previous.cell != creature.cell;
         bool face_right = tracked ? subject_.face_right
@@ -872,9 +867,9 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
         const bool bite = (tracked && eating) || attacking;
         const bool walking = attacking || (tracked ? stride : moved && motion_duration_ && (now_ms_ / 85) % 2);
         if (detail) {
-            detail_sprite(px, py, creature.genes, face_right, walking, bite, color);
+            detail_sprite(px, py, creature.look, face_right, walking, bite, color);
         } else {
-            sprite(px, py, 1, diet_shape(creature.genes), face_right, walking, bite, color, creature.genes.faction);
+            sprite(px, py, 1, creature.look.shape(), face_right, walking, bite, color, creature.look.faction());
         }
         if (bite) {
             pixel(px + (face_right ? tile - 1 : 0), py + (detail ? 11 : 4),

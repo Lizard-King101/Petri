@@ -42,7 +42,7 @@ petri::World world(4, {24, true, 1, 0, true, true});
 #else
 petri::World world(42);
 #endif
-petri::Panel panel(world);
+petri::LocalPanel panel(world);
 #ifdef PETRI_OBSERVATORY
 petri::PanelInput panelInput;
 petri::Observation observation;

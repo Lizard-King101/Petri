@@ -18,7 +18,7 @@ struct Writer {
 
 } // namespace
 
-std::size_t capture_observation(const World& world, const Panel& panel, std::uint32_t revision,
+std::size_t capture_observation(const World& world, const LocalPanel& panel, std::uint32_t revision,
                                 Observation& output) {
     const auto& metrics = world.metrics();
     const auto body_size = observation_header_size + panel.frame().size() * 2 +
@@ -69,6 +69,71 @@ std::size_t capture_observation(const World& world, const Panel& panel, std::uin
             writer.put(point.y);
             writer.put(creature.genes.faction);
         }
+    }
+
+    std::uint32_t checksum = 2166136261u;
+    for (const auto* byte = output.data() + observation_prefix_size; byte < writer.next; ++byte) {
+        checksum = (checksum ^ *byte) * 16777619u;
+    }
+    writer.put(checksum);
+    return writer.next - output.data();
+}
+
+std::size_t capture_observation(const RenderState& state, const std::array<CreatureDetails, capacity>& details,
+                                const ObservationCounts& counts, const Panel& panel, std::uint32_t revision,
+                                Observation& output) {
+    unsigned population = 0;
+    for (const auto& creature : state.creatures) {
+        population += creature.alive();
+    }
+    const auto body_size = observation_header_size + panel.frame().size() * 2 + population * observation_creature_size;
+
+    Writer writer{output.data()};
+    for (const char byte : {'P', 'T', 'R', '4'}) {
+        writer.put(std::uint8_t(byte));
+    }
+    writer.put(std::uint32_t(body_size));
+    writer.put(std::uint16_t(width));
+    writer.put(std::uint16_t(height));
+    writer.put(std::uint16_t(population));
+    writer.put(counts.ticks);
+    writer.put(counts.births);
+    writer.put(counts.deaths);
+    writer.put(counts.kills);
+
+    const auto& camera = panel.camera();
+    writer.put(static_cast<std::uint8_t>(camera.view));
+    writer.put(camera.zoom);
+    writer.put(camera.left);
+    writer.put(camera.top);
+    writer.put(camera.follow);
+    writer.put(revision);
+    writer.put(std::uint8_t(0));
+
+    for (const auto color : panel.frame()) {
+        writer.put(color);
+    }
+    for (std::size_t slot = 0; slot < state.creatures.size(); ++slot) {
+        const auto& creature = state.creatures[slot];
+        if (!creature.alive()) {
+            continue;
+        }
+        const auto& facts = details[slot].id == creature.id ? details[slot] : CreatureDetails{};
+        writer.put(std::uint64_t(creature.id));
+        writer.put(facts.parent);
+        writer.put(facts.founder);
+        writer.put(facts.generation);
+        writer.put(creature.cell);
+        writer.put(facts.energy);
+        writer.put(facts.digestion);
+        writer.put(facts.thrift);
+        writer.put(facts.moisture_preference);
+        writer.put(facts.plants_eaten);
+        writer.put(facts.animal_eaten);
+        const auto point = panel.location(slot);
+        writer.put(point.x);
+        writer.put(point.y);
+        writer.put(creature.look.faction());
     }
 
     std::uint32_t checksum = 2166136261u;

@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     }
 
     petri::Observation snapshot;
-    petri::Panel panel(world);
+    petri::LocalPanel panel(world);
     petri::PanelInput commands;
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();

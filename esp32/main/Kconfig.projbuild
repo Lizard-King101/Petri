@@ -10,6 +10,9 @@ config PETRI_APP_SELFTEST
 config PETRI_APP_LINKTEST
     bool "SPI link test with the SAMD51"
 
+config PETRI_APP_WORLD
+    bool "World owner for the dual-processor firmware"
+
 endchoice
 
 config PETRI_BLE_ADVERTISE

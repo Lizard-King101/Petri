@@ -1,6 +1,7 @@
 // Runs the portable Petri self-test on ESP32 core 1 and reports memory.
 #include "linktest.hpp"
 #include "selftest.hpp"
+#include "world_app.hpp"
 
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -76,6 +77,7 @@ void start_ble() {
 }
 #endif
 
+#if CONFIG_PETRI_APP_SELFTEST
 void selftest_task(void*) {
     petri::selftest::run({
         [] { return std::uint64_t(esp_timer_get_time()); },
@@ -89,6 +91,7 @@ void selftest_task(void*) {
     std::printf("DONE core=%d\n", xPortGetCoreID());
     vTaskDelete(nullptr);
 }
+#endif
 
 } // namespace
 
@@ -104,6 +107,8 @@ extern "C" void app_main() {
 #endif
 #if CONFIG_PETRI_APP_LINKTEST
     start_linktest();
+#elif CONFIG_PETRI_APP_WORLD
+    start_world_app();
 #else
     // Core 1 runs only the simulation, as planned for the dual-processor firmware.
     xTaskCreatePinnedToCore(selftest_task, "petri", 16384, nullptr, 5, nullptr, 1);

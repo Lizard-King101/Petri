@@ -45,10 +45,11 @@ constexpr std::uint64_t timing_from = 2000;
 constexpr std::uint32_t bucket_us = 25;
 constexpr std::size_t bucket_count = 400;
 
-// Static and constructed in place: a World is larger than an ESP32 task stack,
-// so even a temporary copy would overflow it.
-std::optional<World> world_storage;
-std::optional<Panel> panel_storage;
+// Heap-allocated once and constructed in place: a World is larger than an ESP32
+// task stack, and static storage would crowd the ESP32's static DRAM segment,
+// which Bluetooth shrinks by 56 KB.
+std::optional<World>* world_storage = new std::optional<World>;
+std::optional<LocalPanel>* panel_storage = new std::optional<LocalPanel>;
 std::array<std::uint32_t, bucket_count> histogram{};
 
 // Some embedded printf builds (newlib-nano on the SAMD51) cannot format
@@ -101,7 +102,7 @@ std::uint32_t percentile_us(std::uint64_t total, unsigned percent) {
 }
 
 void run_case(const Host& host, const Case& test) {
-    auto& world = world_storage.emplace(test.seed, test.config);
+    auto& world = world_storage->emplace(test.seed, test.config);
     histogram.fill(0);
     std::uint64_t busy_us = 0, timed_steps = 0, max_us = 0;
     std::uint64_t last_yield = host.now_us();
@@ -134,11 +135,11 @@ void run_case(const Host& host, const Case& test) {
 
 void measure_render(const Host& host) {
     // Frames from the observatory world, which the current firmware renders.
-    auto& world = world_storage.emplace(14, observatory_config());
+    auto& world = world_storage->emplace(14, observatory_config());
     for (int tick = 0; tick < 256; ++tick) {
         world.step();
     }
-    auto& panel = panel_storage.emplace(world);
+    auto& panel = panel_storage->emplace(world);
     static constexpr const char* names[] = {"close", "hunt", "life", "habitat"};
     std::uint32_t now_ms = 0;
     for (const auto* name : names) {

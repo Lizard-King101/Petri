@@ -2,10 +2,13 @@
 
 // SPI link between the SAMD51 (master) and the ESP32 (slave).
 //
-// Every SPI transaction exchanges one fixed-size frame in each direction.
-// The ESP32 queues its outgoing frame and drives READY low. The SAMD51 waits
-// for READY low, selects the ESP32, and clocks `frame_bytes` bytes. The ESP32
-// drives READY high again as soon as chip select falls.
+// Every SPI transaction exchanges one frame in each direction. The ESP32
+// queues a frame of up to `frame_bytes` and drives READY low. The SAMD51 waits
+// for READY low, selects the ESP32, and drives READY high again through the
+// ESP32's chip-select interrupt. The link test clocks whole frames. The
+// firmware clocks the 16-byte headers first, then only as many payload bytes as
+// the longer of the two frames needs (`transfer_bytes`), without releasing
+// chip select, so an idle poll costs microseconds.
 //
 // Frame layout, little-endian:
 //   0  magic 'P' 'L'       2  version         3  type
@@ -34,7 +37,18 @@ enum class Type : std::uint8_t {
     idle = 0,     // No payload of interest; keeps sequences and acknowledgments moving.
     test = 1,     // Link test pattern.
     restart = 2,  // Master asks the ESP32 to restart (link test only).
+    render = 3,   // ESP32 to SAMD51: one render-stream payload (render/render_stream.hpp).
+    command = 4,  // SAMD51 to ESP32: link/messages.hpp.
+    telemetry = 5, // ESP32 to SAMD51: link/messages.hpp.
+    census = 6,    // ESP32 to SAMD51: creature details for the observatory, link/messages.hpp.
+    checkpoint = 7, // ESP32 to SAMD51: a chunk of a world checkpoint, link/messages.hpp.
+    restore = 8,   // SAMD51 to ESP32: a chunk of a checkpoint to load, link/messages.hpp.
 };
+
+// Header flag: the sender has more frames queued, so poll again at once.
+inline constexpr std::uint16_t more_pending = 1;
+// Header flag from the ESP32: it has no world yet and waits for start_fresh or a restore.
+inline constexpr std::uint16_t awaiting_world = 2;
 
 using Frame = std::array<std::uint8_t, frame_bytes>;
 
@@ -52,6 +66,18 @@ void seal(Frame& frame, const Header& header);
 Decode open(const Frame& frame, Header& header);
 
 inline std::uint8_t* payload(Frame& frame) { return frame.data() + header_bytes; }
+
+// Payload bytes to clock after the headers so both frames arrive whole. ESP32
+// DMA receives whole 32-bit words, so the count is rounded up to a multiple of 4.
+inline std::size_t transfer_bytes(std::size_t sent_length, std::size_t received_length) {
+    const auto longer = sent_length > received_length ? sent_length : received_length;
+    return (longer + 3) & ~std::size_t(3);
+}
+// Reads the payload length from a header without validating the frame.
+inline std::size_t peek_length(const Frame& frame) {
+    const std::size_t length = frame[8] | frame[9] << 8;
+    return length <= payload_max ? length : payload_max;
+}
 inline const std::uint8_t* payload(const Frame& frame) { return frame.data() + header_bytes; }
 
 // Deterministic test bytes. Each direction uses its own salt.

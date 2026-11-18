@@ -10,11 +10,12 @@ if(PETRI_WIDE_WORLD)
     target_compile_definitions(petri_core PUBLIC PETRI_WIDE_WORLD=1)
 endif()
 
-add_library(petri_render render/life.cpp render/panel.cpp render/observation.cpp)
+add_library(petri_render render/render_state.cpp render/render_stream.cpp render/life.cpp render/panel.cpp
+    render/observation.cpp)
 target_include_directories(petri_render PUBLIC render)
 target_link_libraries(petri_render PUBLIC petri_core)
 
-add_library(petri_link link/link.cpp)
+add_library(petri_link link/link.cpp link/messages.cpp)
 target_include_directories(petri_link PUBLIC link)
 target_compile_features(petri_link PUBLIC cxx_std_17)
 
@@ -37,6 +38,9 @@ if(BUILD_TESTING)
     add_executable(petri_link_tests tests/link_test.cpp)
     target_link_libraries(petri_link_tests PRIVATE petri_link)
     add_test(NAME petri_link COMMAND petri_link_tests)
+    add_executable(petri_render_stream_tests tests/render_stream_test.cpp)
+    target_link_libraries(petri_render_stream_tests PRIVATE petri_render)
+    add_test(NAME petri_render_stream COMMAND petri_render_stream_tests)
     add_test(NAME petri_cli_smoke COMMAND petri --seed 42 --ticks 1000)
     set_tests_properties(petri_cli_smoke PROPERTIES
         PASS_REGULAR_EXPRESSION "tick=1000")

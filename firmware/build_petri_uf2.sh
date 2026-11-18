@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
-    echo "Usage: $0 /path/to/uf2conv.py [output.uf2] [checkpoint.petri|--wide|--connected|--observatory|--selftest|--linktest]" >&2
+    echo "Usage: $0 /path/to/uf2conv.py [output.uf2] [checkpoint.petri|--wide|--connected|--observatory|--selftest|--linktest|--display]" >&2
     exit 2
 fi
 
@@ -11,7 +11,15 @@ output=${2:-"$repo/build/petri-matrixportal-m4.uf2"}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-if [ "${3:-}" = --linktest ]; then
+if [ "${3:-}" = --display ]; then
+    sketch="$stage/petri_display"
+    mkdir -p "$sketch/src" "$(dirname -- "$output")"
+    cp "$repo/firmware/petri_display/petri_display.ino" "$sketch/"
+    cp "$repo/link/link.cpp" "$repo/link/link.hpp" "$repo/link/messages.cpp" "$repo/link/messages.hpp" \
+        "$repo/firmware/link_master.hpp" "$repo/firmware/checkpoint_store.hpp" \
+        "$repo/render/render_stream.cpp" "$repo/render/render_stream.hpp" \
+        "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
+elif [ "${3:-}" = --linktest ]; then
     sketch="$stage/linktest"
     mkdir -p "$sketch/src" "$(dirname -- "$output")"
     cp "$repo/firmware/linktest/linktest.ino" "$sketch/"
@@ -29,6 +37,7 @@ else
 fi
 if [ "${3:-}" != --linktest ]; then
     cp "$repo/core/world.cpp" "$repo/core/world.hpp" "$repo/core/nests.cpp" "$repo/core/hunting.cpp" "$repo/render/life.cpp" "$repo/render/life.hpp" "$sketch/src/"
+    cp "$repo/render/render_state.cpp" "$repo/render/render_state.hpp" "$sketch/src/"
     cp "$repo/render/panel.cpp" "$repo/render/panel.hpp" "$repo/render/terrain.hpp" "$sketch/src/"
     cp "$repo/firmware/esp32_passthrough/esp32_bridge.hpp" "$sketch/src/"
 fi
@@ -42,6 +51,8 @@ elif [ "${3:-}" = --selftest ]; then
     cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1"
 elif [ "${3:-}" = --linktest ]; then
     :
+elif [ "${3:-}" = --display ]; then
+    cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1"
 elif [ "${3:-}" = --observatory ]; then
     cp "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
     cpp_flags="$cpp_flags -DPETRI_WIDE_WORLD=1 -DPETRI_CONNECTED_BIOMES=1 -DPETRI_OBSERVATORY=1"

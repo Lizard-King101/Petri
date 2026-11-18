@@ -160,7 +160,7 @@ void check_motion() {
 
 void check_panel_camera() {
     petri::World world(14, petri::observatory_config());
-    petri::Panel panel(world);
+    petri::LocalPanel panel(world);
     petri::PanelInput input;
     const auto send = [&](const char* bytes) {
         bool requested = false;
@@ -226,7 +226,7 @@ void check_zoom_layers() {
     });
     check(target != world.creatures().end(), "Zoom fixture needs a live creature sharing plants and carrion");
 
-    petri::Panel panel(world);
+    petri::LocalPanel panel(world);
     constexpr auto carrion = petri::rgb565(160, 20, 120);
     std::uint16_t body = 0, coat = 0;
     std::uint32_t now = 0;
@@ -388,7 +388,7 @@ void check_terrain_projection() {
         const int tile = 1 << (zoom - 1);
         const int left = subject->cell % petri::width * tile - petri::panel_width / 2;
         const int top = subject->cell / petri::width * tile - petri::panel_height / 2;
-        petri::Panel panel(world);
+        petri::LocalPanel panel(world);
         const auto place = [&](int x, int y) {
             panel.set_camera({zoom == 3 ? petri::PanelView::life : petri::PanelView::close,
                 static_cast<std::uint8_t>(zoom), static_cast<std::uint16_t>(x), static_cast<std::uint16_t>(y)}, 0);
@@ -425,7 +425,7 @@ void check_fruit_detail() {
     }
     check(subject >= 0, "No ripe fruit to verify on the panel");
     constexpr auto fruit_color = petri::rgb565(248, 116, 24);
-    petri::Panel panel(world);
+    petri::LocalPanel panel(world);
     const auto before = world.fingerprint();
     for (const int zoom : {3, 4, 5}) {
         const int tile = 1 << (zoom - 1);
@@ -493,7 +493,7 @@ void check_dynamic_environment() {
 void check_death_presentation() {
     for (const auto zoom : {petri::sprite_zoom, petri::detail_zoom}) {
         petri::World world(42, {0, true, 1});
-        petri::Panel panel(world);
+        petri::LocalPanel panel(world);
         panel.set_camera({petri::PanelView::close, static_cast<std::uint8_t>(zoom), 0, 0, 1}, 0);
         panel.draw(0, 0, 3);
         std::uint32_t now = 0;
@@ -545,7 +545,7 @@ void check_attack_presentation() {
         }
         check(found, "No matching attack fixture found");
         world = before;
-        petri::Panel panel(world);
+        petri::LocalPanel panel(world);
         panel.set_camera({petri::PanelView::close, petri::detail_zoom, 0, 0, pair.target}, 0);
         panel.draw(0, 0, 3);
         world.step(panel.before_step(1000));

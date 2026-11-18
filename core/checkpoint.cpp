@@ -2,20 +2,51 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <limits>
+#include <new>
 
 namespace petri {
 namespace {
 
 constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 15};
 
+// Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
-    std::uint8_t* cursor;
+    World::ChunkSink sink;
+    void* context;
+    std::array<std::uint8_t, 256> chunk{};
+    std::size_t used = 0, total = 0;
+    std::uint64_t hash = 14695981039346656037ull;
 
+    void byte(std::uint8_t value, bool hashed = true) {
+        if (hashed) {
+            hash = (hash ^ value) * 1099511628211ull;
+        }
+        chunk[used++] = value;
+        ++total;
+        if (used == chunk.size()) {
+            flush();
+        }
+    }
     template<class Integer>
     void put(Integer value) {
-        for (std::size_t byte = 0; byte < sizeof(value); ++byte) {
-            *cursor++ = static_cast<std::uint8_t>(std::uint64_t(value) >> (8 * byte));
+        for (std::size_t byte_index = 0; byte_index < sizeof(value); ++byte_index) {
+            byte(static_cast<std::uint8_t>(std::uint64_t(value) >> (8 * byte_index)));
+        }
+    }
+    void finish() {
+        // The checksum covers everything before it.
+        const auto value = hash;
+        for (std::size_t byte_index = 0; byte_index < sizeof(value); ++byte_index) {
+            byte(static_cast<std::uint8_t>(value >> (8 * byte_index)), false);
+        }
+        flush();
+    }
+    void flush() {
+        if (used) {
+            sink(context, chunk.data(), used);
+            used = 0;
         }
     }
 };
@@ -49,7 +80,22 @@ bool valid_trait(std::uint8_t trait) {
 } // namespace
 
 void World::save_checkpoint(Checkpoint& checkpoint) const {
-    Writer writer{std::copy(header.begin(), header.end(), checkpoint.begin())};
+    struct Target {
+        Checkpoint& checkpoint;
+        std::size_t at = 0;
+    } target{checkpoint};
+    save_checkpoint([](void* context, const std::uint8_t* data, std::size_t size) {
+        auto& t = *static_cast<Target*>(context);
+        std::memcpy(t.checkpoint.data() + t.at, data, std::min(size, t.checkpoint.size() - t.at));
+        t.at += size;
+    }, &target);
+}
+
+std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
+    Writer writer{sink, context};
+    for (const auto byte : header) {
+        writer.put(byte);
+    }
     writer.put(rng_);
     writer.put(std::uint8_t(trait_effects_));
     writer.put(carcass_decay_);
@@ -136,7 +182,8 @@ void World::save_checkpoint(Checkpoint& checkpoint) const {
         writer.put(creature.genes.faction);
         writer.put(creature.packed_fruit);
     }
-    writer.put(checksum(checkpoint.data(), checkpoint.size()));
+    writer.finish();
+    return writer.total;
 }
 
 bool World::load_checkpoint(const Checkpoint& checkpoint) {
@@ -200,6 +247,26 @@ bool World::load_checkpoint(const FloraCheckpoint& checkpoint) {
 }
 
 bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version) {
+    // Stage the decoded state so a rejected checkpoint leaves the running world intact.
+    World decoded;
+    if (!decode_into(decoded, data, size, version)) {
+        return false;
+    }
+    *this = decoded;
+    return true;
+}
+
+bool World::load_checkpoint_in_place(const std::uint8_t* data, std::size_t size) {
+    if (size != std::tuple_size<Checkpoint>::value) {
+        return false;
+    }
+    // Start from the same defaults a staged decode uses, without a temporary World.
+    this->~World();
+    new (this) World();
+    return decode_into(*this, data, size, header.back());
+}
+
+bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t size, std::uint8_t version) {
     const bool legacy = version == 1;
     Reader trailer{data + size - sizeof(std::uint64_t)};
     if (!std::equal(header.begin(), header.end() - 1, data) ||
@@ -208,8 +275,6 @@ bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::u
         return false;
     }
 
-    // Stage the decoded state so a rejected checkpoint leaves the running world intact.
-    World decoded;
     Reader reader{data + header.size()};
     decoded.rng_ = reader.get<std::uint32_t>();
     const auto trait_effects = reader.get<std::uint8_t>();
@@ -616,7 +681,6 @@ bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::u
         return false;
     }
 
-    *this = decoded;
     return true;
 }
 

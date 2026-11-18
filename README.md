@@ -898,6 +898,50 @@ controller. NimBLE advertising used about 96 KB of byte-addressable heap and
 47 KB of IRAM heap. Simulation timing did not change, because NimBLE runs on
 core 0.
 
+### Render state and stream
+
+The renderer draws a `RenderState`, never `World` directly. It holds 3-byte
+render cells, creature phenotypes, and step events. `LocalPanel` captures that
+state from a `World` on the same chip. The ESP32 will stream it to the
+SAMD51 with `stream::Encoder` and `stream::Decoder`. See the
+[render-state section](docs/DUAL_PROCESSOR.md#render-state) of the plan
+for the formats, frame comparisons, and stream sizes. In the 128×64 world an
+update is about 3.6 KB at one tick per update and 12 KB at twelve.
+`tests/render_stream_test.cpp` prints those figures.
+
+```sh
+firmware/build_petri_uf2.sh /path/to/uf2conv.py build/petri-observatory-mirror.uf2 --observatory
+```
+
+### Dual-processor firmware
+
+The ESP32 runs the world, and the SAMD51 draws it from the render stream.
+Flash the ESP32 world app through a bridge, then the display firmware:
+
+```sh
+cd esp32
+idf.py -B build-world -DSDKCONFIG=build-world/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.world" build
+idf.py -B build-world -DSDKCONFIG=build-world/sdkconfig -p /dev/ttyACM0 -b 460800 flash
+cd ..
+firmware/build_petri_uf2.sh /path/to/uf2conv.py build/petri-display.uf2 --display
+```
+
+Tap UP to change view. Tap DOWN to cycle 1, 2, 4, and 8 ticks/s, and hold
+DOWN to pause. Over USB, `>` and `|` do the same as a DOWN tap and hold. The
+companion connects as before. Its inspector shows the ESP32's census, which
+can be up to one second old. Once a second the display prints a `DISPLAY` and
+a `STREAM` line with the tick, world fingerprint, frame and update rates, and
+stream health.
+
+The world is saved to QSPI every 10 minutes in four rotating slots. A SAMD51
+reset or power cut also restarts the ESP32. On every boot the SAMD51 restores
+the newest valid slot, or starts seed 14 fresh if none is valid. A save that
+was interrupted leaves its slot invalid, and the previous slot is used. USB
+commands: `S` saves now. The test hooks are `C`, which toggles back-to-back
+saves, and `X`, which corrupts the newest slot. These checkpoints replace the
+CIRCUITPY drive that was on the QSPI flash. Its files are in `backups/`.
+
 ### SPI link test
 
 `link/link.hpp` defines the fixed 4,112-byte frame the SAMD51 and ESP32

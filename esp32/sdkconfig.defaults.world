@@ -1,0 +1,2 @@
+# Layer on sdkconfig.defaults for the dual-processor world owner.
+CONFIG_PETRI_APP_WORLD=y

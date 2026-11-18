@@ -302,6 +302,13 @@ public:
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
     std::uint64_t fingerprint() const;
     void save_checkpoint(Checkpoint& checkpoint) const;
+    // Streams the same bytes in chunks of up to 256 bytes. Returns the total size.
+    using ChunkSink = void (*)(void* context, const std::uint8_t* data, std::size_t size);
+    std::size_t save_checkpoint(ChunkSink sink, void* context) const;
+    // Decodes a current-version checkpoint directly into this world, without a
+    // staging copy. On failure the world is left in an unspecified state and must
+    // be replaced. Use it only when no running world needs protecting, such as at boot.
+    bool load_checkpoint_in_place(const std::uint8_t* data, std::size_t size);
     bool load_checkpoint(const Checkpoint& checkpoint);
     bool load_checkpoint(const LegacyCheckpoint& checkpoint);
     bool load_checkpoint(const ScavengingCheckpoint& checkpoint);
@@ -321,6 +328,7 @@ public:
 private:
     World() = default;
     bool decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version);
+    static bool decode_into(World& decoded, const std::uint8_t* data, std::size_t size, std::uint8_t version);
     std::uint32_t random();
     void update_plants();
     void update_staggered_environment();

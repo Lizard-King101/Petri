@@ -1,6 +1,6 @@
 #pragma once
 
-#include "world.hpp"
+#include "render_state.hpp"
 
 namespace petri {
 
@@ -24,8 +24,10 @@ constexpr std::uint16_t rgb565(unsigned red, unsigned green, unsigned blue) {
 }
 
 int interpolate_axis(int from, int to, std::uint32_t elapsed, std::uint32_t duration);
-std::uint16_t biome_tint(unsigned moisture, unsigned plants);
-std::uint16_t creature_tint(const World& world);
+std::uint16_t biome_tint(Biome biome, unsigned plants);
+std::uint16_t creature_tint(bool connected_biomes);
+void render_life(const RenderState& state, Frame& frame, bool show_creatures = true);
+// Captures the world first. For tests and tools; it holds its own RenderState.
 void render_life(const World& world, Frame& frame, bool show_creatures = true);
 
 } // namespace petri
