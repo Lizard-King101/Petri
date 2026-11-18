@@ -62,6 +62,7 @@ Look look_of(const Genome& genes);
 // which removes most per-tick churn from the stream.
 struct RenderCell {
     // Bits 0-1: biome. Bits 2-5: moisture / 16. Bit 6: carcass present.
+    // Bit 7: the carcass is fresh, at least half a body (fresh_carcass_units).
     std::uint8_t terrain = 0;
     std::uint8_t plants = 0;
     // Bits 0-4: detritus capped at 16, as every drawing use caps it.
@@ -72,6 +73,7 @@ struct RenderCell {
     // The middle of the stored moisture level.
     unsigned moisture() const { return ((terrain >> 2) & 15) * 16u + 8u; }
     bool carcass() const { return (terrain >> 6) & 1; }
+    bool fresh_carcass() const { return (terrain >> 7) & 1; }
     unsigned detritus() const { return detail & 31; }
     bool shrub() const { return (detail >> 5) != 0; }
     int fruit() const { return shrub() ? (detail >> 5) - 1 : 0; }
@@ -82,6 +84,9 @@ struct RenderCell {
     friend bool operator!=(const RenderCell& a, const RenderCell& b) { return !(a == b); }
 };
 static_assert(sizeof(RenderCell) == 3);
+
+// Carcass units at which remains still read as a fresh body; a death leaves body_mass.
+inline constexpr unsigned fresh_carcass_units = body_mass / 2 + 1;
 
 RenderCell render_cell(const World& world, std::size_t index);
 

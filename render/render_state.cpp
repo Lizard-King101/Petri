@@ -37,7 +37,7 @@ RenderCell render_cell(const World& world, std::size_t index) {
     const auto& cell = world.cells()[index];
     const unsigned stock = world.fruiting_shrub(index) ? 1u + world.fruit_at(index) : 0u;
     const unsigned terrain = static_cast<unsigned>(biome_at(cell.moisture)) | (cell.moisture >> 4) << 2 |
-                             (cell.animal ? 1u : 0u) << 6;
+                             (cell.animal ? 1u : 0u) << 6 | (cell.animal >= fresh_carcass_units ? 1u : 0u) << 7;
     return {static_cast<std::uint8_t>(terrain), cell.plants,
             static_cast<std::uint8_t>(std::min<unsigned>(16, cell.detritus) | stock << 5)};
 }

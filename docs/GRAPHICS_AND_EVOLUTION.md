@@ -159,8 +159,36 @@ Everything here is presentation and never feeds back into the biology.
   - On the board: 30 fps, worst frame 23–27 ms, unchanged from before.
   - `petri_snapshot --biome 0|1|2`, `--x/--y`, and `--storm 1` hold the
     camera over a biome, a cell, or the strongest storm.
-  - Still to do: smoother growth, grazing flicks from meal events, and a
-    texture for the overview.
+- **Plants, second pass.**
+  - Each visible cell draws a plant amount that steps toward the real one
+    every 70 ms, so a grazed clump shrinks over a few frames.
+  - A plant meal makes the plant jerk for 450 ms, and bits of leaf fly from
+    the creature's mouth.
+  - The wide overview averages the tints of the four cells under each pixel,
+    so biome edges blend. It shades open water bluer with depth and adds a
+    fixed grain. Creature and carrion colors are unchanged.
+- **Procedural morphology (graphics step 3): done.**
+  - Creatures with morphology genes take their body color from pigment, on
+    the ground-tone scale from rust (driest scrub) through ochre, green, and
+    teal to blue (deepest water). The colors follow the ground's hues but
+    stay brighter, so a matched creature blends in without vanishing.
+  - Size class scales the sprite about its feet: 5 to 10 pixels wide at
+    zoom 4, and 11/16 to 20/16 of the cell at zoom 5. Big creatures overlap
+    their neighbours.
+  - Limbs set leg length: 1 to 3 rows at zoom 4, and at zoom 5 they lift or
+    lower the body by up to 3 pixels.
+  - Pattern draws plain, spots, stripes, or bold blotches on the torso.
+    Faction markers stay on top.
+  - Looks without morphology genes draw as before.
+  - The observatory configuration now enables morphology. On the ESP32 its
+    fingerprints match native, at 152 ticks/s.
+  - A world restored from an older checkpoint keeps morphology off until a
+    fresh start.
+- **Carcass remains.** `RenderCell` bit 7 marks a fresh carcass, at least
+  5 of the 8 units a death leaves. At zoom 4 and 5 a fresh carcass is a red
+  lump with ribs showing; below that it is a skeleton. After a carcass is
+  eaten, faded bones stay briefly. Zoom 3 and the overview keep magenta
+  carrion.
 - **Day/night: deferred to the biology.** The simulation has no daylight,
   so lighting tied to time of day would only be decoration. It is a joint
   item: the simulation track adds daylight that affects growth and

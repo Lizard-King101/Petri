@@ -15,6 +15,13 @@ struct Camera {
     std::uint64_t follow = 0;
 };
 
+// The body plan a Look draws: size class 0-7, pattern 0-3, limbs 0-3. Looks
+// without morphology genes draw the founders' standard: size 3, plain, limbs 1.
+struct Build {
+    int size = 3, pattern = 0, limbs = 1;
+};
+Build build_of(Look look);
+
 struct PanelPoint {
     static constexpr std::int8_t hidden = -128;
     std::int8_t x = hidden, y = hidden;
@@ -86,9 +93,17 @@ private:
     void draw_terrain_rect(int x0, int y0, int x1, int y1, int tile);
     std::uint16_t ground_pixel(int x, int y, int tile) const;
     void draw_deaths(int tile);
+    // Carcass remains at zoom 4 and 5: a fresh lump, or bones once mostly eaten.
+    // `bare` draws faded bones where the carcass is already gone.
+    void draw_remains(int x, int y, int tile, int index, bool bare = false);
     void draw_contact(int tile);
     void draw_hunt();
     void plant_sprite(int x, int y, int tile, int index);
+    // The plant amount drawn for a cell, easing toward the real one.
+    int shown_plants(int index);
+    // Milliseconds since a creature grazed the cell, or -1.
+    int grazing_age(int index) const;
+    void draw_grazing(int tile);
     // Lean of a plant's tip in pixels, -3 to 3, from the storms' wind and the breeze.
     int plant_lean(int index, std::uint32_t salt) const;
     // One stalk or blade rising from (x, y), spreading `slant` pixels sideways at the
@@ -96,7 +111,8 @@ private:
     void plant_blade(int x, int y, int height, int slant, int lean, std::uint16_t base, std::uint16_t mid,
                      std::uint16_t tip);
     void sprite(int x, int y, int scale, DietShape diet, bool face_right,
-                bool stride, bool mouth_open, std::uint16_t body, std::uint8_t faction = 0, int height = 7);
+                bool stride, bool mouth_open, std::uint16_t body, std::uint8_t faction = 0, int height = 7,
+                Build build = {});
     void detail_sprite(int x, int y, Look look, bool face_right,
                        bool stride, bool eating, std::uint16_t body, int height = 16);
     void fill(int x, int y, int w, int h, std::uint16_t color);
@@ -122,6 +138,22 @@ private:
         bool connected = false, valid = false;
     } terrain_;
     bool terrain_cache_enabled_ = true;
+    // Recent plant meals, for grazing flicks.
+    struct Grazing {
+        std::uint16_t cell = 0;
+        std::uint32_t at = 0;
+        bool active = false;
+    };
+    std::array<Grazing, 16> grazing_{};
+    std::uint8_t grazing_next_ = 0;
+    // Plant amounts as drawn, keyed by cell position like the terrain ring.
+    static constexpr int plant_columns = 20, plant_rows = 12;
+    struct PlantShown {
+        std::uint16_t index = 0xffff;
+        std::uint8_t plants = 0;
+        std::uint32_t stepped_at = 0;
+    };
+    std::array<PlantShown, plant_columns * plant_rows> plants_shown_{};
     bool weather_enabled_ = true, rain_enabled_ = true;
     std::uint32_t terrain_pixels_drawn_ = 0;
     Camera camera_{PanelView::close, sprite_zoom};

@@ -17,6 +17,7 @@ constexpr Config observatory_config() {
     config.fruiting_plants = true;
     config.dynamic_environment = wide_world;
     config.storm_fronts = wide_world;
+    config.morphology = true;
     return config;
 }
 

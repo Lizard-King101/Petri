@@ -11,6 +11,7 @@ constexpr std::uint32_t hunt_visible = 2350, hunt_quiet = 350;
 constexpr std::uint32_t approach_time = 750, bite_time = 1150, meal_visible = 900;
 constexpr std::uint32_t attack_impact = 280, attack_action = 800, attack_rejoin = 300;
 constexpr std::uint32_t collapse_time = 700, death_visible = 1900;
+constexpr std::uint32_t grazing_visible = 450;
 constexpr auto followed_color = rgb565(64, 208, 240);
 constexpr auto carrion_color = rgb565(160, 20, 120);
 constexpr auto eye_color = rgb565(240, 244, 192);
@@ -48,10 +49,47 @@ constexpr std::uint32_t terrain_pattern(unsigned cell) {
     return value ^ (value >> 16);
 }
 
+// Pigment on the ground-tone scale: 1 matches the driest scrub, 15 the deepest
+// water. The colors follow the ground's hues but stay brighter, so a matched
+// creature blends in without vanishing.
+std::uint16_t pigment_color(int tone) {
+    struct Key {
+        int tone;
+        unsigned r, g, b;
+    };
+    static constexpr std::array<Key, 7> keys{{{1, 214, 112, 58}, {3, 204, 152, 62}, {5, 156, 182, 66}, {7, 98, 186, 94},
+                                              {10, 66, 174, 140}, {13, 60, 150, 190}, {15, 70, 128, 214}}};
+    tone = std::clamp(tone, 1, 15);
+    std::size_t i = 0;
+    while (i + 2 < keys.size() && tone > keys[i + 1].tone) {
+        ++i;
+    }
+    const auto& a = keys[i];
+    const auto& b = keys[i + 1];
+    const int span = b.tone - a.tone, at = std::clamp(tone - a.tone, 0, span);
+    const auto lerp = [&](unsigned from, unsigned to) { return (from * unsigned(span - at) + to * unsigned(at)) / unsigned(span); };
+    return rgb565(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b));
+}
+
 std::uint16_t body_color(bool connected_biomes, Look look) {
+    if (look.morphology()) {
+        return pigment_color(look.pigment());
+    }
     constexpr std::array colors{rgb565(208, 96, 48), rgb565(208, 160, 48), rgb565(112, 192, 112)};
     return connected_biomes ? colors[static_cast<unsigned>(look.body())] : creature_tint(connected_biomes);
 }
+
+// Darker and lighter coat shades for patterns.
+std::uint16_t pattern_shade(std::uint16_t body) {
+    return blend(body, 0, 110);
+}
+
+std::uint16_t pattern_light(std::uint16_t body) {
+    return blend(body, rgb565(255, 250, 230), 90);
+}
+
+constexpr auto meat_color = rgb565(150, 34, 58), meat_dark = rgb565(96, 18, 40);
+constexpr auto bone_color = rgb565(226, 214, 190), bone_dim = rgb565(150, 140, 124);
 
 } // namespace
 
@@ -107,6 +145,10 @@ void Panel::apply(const RenderEvent& event) {
         break;
     case RenderEvent::Kind::meal:
         mark_meal(event.first.id, event.flag);
+        if (!event.flag) {
+            grazing_[grazing_next_] = {event.first.cell, now_ms_, true};
+            grazing_next_ = static_cast<std::uint8_t>((grazing_next_ + 1) % grazing_.size());
+        }
         break;
     case RenderEvent::Kind::attack:
         mark_attack(event.first, event.second, event.flag);
@@ -233,46 +275,85 @@ void Panel::fill(int x, int y, int w, int h, std::uint16_t color) {
     }
 }
 
+Build build_of(Look look) {
+    if (!look.morphology()) {
+        return {};
+    }
+    return {look.size_class(), look.pattern(), look.limbs()};
+}
+
 void Panel::sprite(int x, int y, int scale, DietShape diet, bool face_right,
-                   bool stride, bool mouth_open, std::uint16_t body, std::uint8_t faction, int height) {
+                   bool stride, bool mouth_open, std::uint16_t body, std::uint8_t faction, int height, Build build) {
+    // Rows 0-5 are the body and head, row 6 the legs.
     static constexpr char shapes[][7][9] = {
         {"....#...", "....###.", "...##o##", "#######.", ".#####t.", "..#####.", "..l..l.."},
         {"........", "#...#.#.", "##..#o#.", "########", ".######.", "..####..", "..l..l.."},
         {".....#.#", ".....###", "....##o.", ".#######", "#######.", "..####..", "..l..l.."},
     };
+    // Body size sets the drawn width and body height; limbs set the leg length.
+    static constexpr std::array<int, 8> widths{5, 6, 7, 8, 8, 9, 9, 10}, bodies{3, 4, 5, 6, 6, 7, 7, 8};
+    static constexpr std::array<int, 4> legs{1, 1, 2, 3};
+    const int size = std::clamp(build.size, 0, 7);
+    const int w = widths[size], body_rows = bodies[size], leg_rows = legs[std::clamp(build.limbs, 0, 3)];
+    const int total = body_rows + leg_rows;
+    const int left = (8 - w) / 2 - (w > 8 ? 1 : 0);
     const auto& shape = shapes[static_cast<unsigned>(diet)];
-    const auto part_at = [&](int col, int row, std::uint16_t color) {
-        fill(x + (face_right ? col : 7 - col) * scale, y + (7 - height + row * height / 7) * scale,
-             scale, scale, color);
+    // Row r of `total` sits so the feet stay on row 6 of the cell; `height` squashes
+    // the sprite toward the ground as it collapses.
+    const auto put = [&](int col, int row, std::uint16_t color) {
+        const int dx = left + col;
+        const int dy = 6 - (total - 1 - row) * height / 7;
+        fill(x + (face_right ? dx : 7 - dx) * scale, y + dy * scale, scale, scale, color);
     };
-    for (int row = 0; row < 7; ++row) {
-        for (int col = 0; col < 8; ++col) {
-            const char part = shape[row][col];
-            if (part == '.' || (mouth_open && diet == DietShape::meat && row == 3 && col >= 5)) {
+    const auto shade = pattern_shade(body);
+    for (int row = 0; row < body_rows; ++row) {
+        const int src_row = row * 6 / body_rows;
+        for (int col = 0; col < w; ++col) {
+            const int src_col = col * 8 / w;
+            const char part = shape[src_row][src_col];
+            if (part == '.' || (mouth_open && diet == DietShape::meat && src_row == 3 && src_col >= 5)) {
                 continue;
             }
-            const auto color = part == 'o' ? (height == 7 ? eye_color : dim(body))
+            auto color = part == 'o' ? (height == 7 ? eye_color : dim(body))
                 : part == 't' ? rgb565(120, 180, 180) : body;
-            const int foot = part == 'l' && stride ? (col == 2 ? -1 : 1) : 0;
-            part_at(col + foot, row, color);
+            // Patterns mark the torso, behind the head.
+            if (part == '#' && src_col < 5 && row >= 1) {
+                const bool marked = build.pattern == 1 ? (col + 2 * row) % 5 == 0
+                    : build.pattern == 2 ? col % 2 == 1 && row * 3 >= body_rows
+                    : build.pattern == 3 ? (col * 2 < w && row * 2 >= body_rows) || (col * 2 >= w && row == 1)
+                    : false;
+                if (marked) {
+                    color = build.pattern == 3 && row == 1 ? pattern_light(body) : shade;
+                }
+            }
+            put(col, row, color);
         }
     }
+    for (const int src_col : {2, 5}) {
+        const int col = src_col * w / 8 + (w > 8 && src_col == 5 ? 1 : 0);
+        const int foot = stride ? (src_col == 2 ? -1 : 1) : 0;
+        for (int k = 0; k < leg_rows; ++k) {
+            put(col + (k == leg_rows - 1 ? foot : 0), body_rows + k, body);
+        }
+    }
+    // Faction markers keep their places on the torso.
     const auto coat = coat_colors[faction];
+    const auto mark = [&](int src_col, int src_row) { put(src_col * w / 8, src_row * body_rows / 6, coat); };
     switch (faction) {
     case 1:
-        part_at(2, 3, coat);
-        part_at(2, 4, coat);
+        mark(2, 3);
+        mark(2, 4);
         break;
     case 2:
-        part_at(3, 4, coat);
+        mark(3, 4);
         break;
     case 3:
-        part_at(2, 3, coat);
-        part_at(3, 3, coat);
+        mark(2, 3);
+        mark(3, 3);
         break;
     case 4:
-        part_at(2, 4, coat);
-        part_at(4, 4, coat);
+        mark(2, 4);
+        mark(4, 4);
         break;
     }
 }
@@ -280,9 +361,25 @@ void Panel::sprite(int x, int y, int scale, DietShape diet, bool face_right,
 void Panel::detail_sprite(int x, int y, Look look, bool face_right,
                           bool stride, bool eating, std::uint16_t body, int height) {
     constexpr int tile = 16;
+    const auto build = build_of(look);
+    // Body size scales the sprite about its feet; limbs stretch or shorten the
+    // legs (rows 10-15) and lift or lower everything above them.
+    static constexpr std::array<int, 8> scales{11, 12, 14, 16, 17, 18, 19, 20};
+    static constexpr std::array<int, 4> stretch{-2, 0, 2, 3};
+    const int scale = scales[std::clamp(build.size, 0, 7)];
+    const int lift = stretch[std::clamp(build.limbs, 0, 3)];
+    const auto row_at = [&](int row) {
+        const int raised = row <= 10 ? (row - lift) * 5 : (10 - lift) * 5 + (row - 10) * (5 + lift);
+        // In fifths of a pixel, then scaled about the ground line and squashed by `height`.
+        const int from_ground = tile * 5 - raised;
+        return y + tile - (from_ground * scale * height + 5 * 16 * 16 / 2) / (5 * 16 * 16);
+    };
+    const auto col_at = [&](int col) { return x + 8 + ((col - 8) * scale + (col >= 8 ? 8 : -8)) / 16; };
     const auto part = [&](int col, int row, int w, int h, std::uint16_t color) {
-        fill(x + (face_right ? col : tile - col - w), y + tile - height + row * height / tile,
-             w, std::max(1, h * height / tile), color);
+        const int c0 = face_right ? col : tile - col - w;
+        const int x0 = col_at(c0), x1 = std::max(x0 + 1, col_at(c0 + w));
+        const int y0 = row_at(row), y1 = std::max(y0 + 1, row_at(row + h));
+        fill(x0, y0, x1 - x0, y1 - y0, color);
     };
     const auto shade = dim(body);
     constexpr auto nose = rgb565(32, 24, 32);
@@ -300,6 +397,29 @@ void Panel::detail_sprite(int x, int y, Look look, bool face_right,
     part(9, 11, 2, 3, body);
     part(4 - int(stride), 14, 3, 1, body);
     part(9 + int(stride), 14, 3, 1, body);
+
+    // Inherited coat patterns, from a few spots to bold disruptive blotches.
+    const auto dark = pattern_shade(body);
+    switch (build.pattern) {
+    case 1:
+        part(5, back + 2, 1, 1, dark);
+        part(8, back + 1, 1, 1, dark);
+        part(7, back + 4, 1, 1, dark);
+        part(4, back + 5, 1, 1, dark);
+        break;
+    case 2:
+        for (int col = 4; col <= 10; col += 2) {
+            part(col, back + 1, 1, std::min(4, 10 - back), dark);
+        }
+        break;
+    case 3:
+        part(3, back + 1, 4, 3, dark);
+        part(8, back + 3, 3, 3, dark);
+        part(5, 10, 4, 1, pattern_light(body));
+        break;
+    default:
+        break;
+    }
 
     // Coat markings share the inherited faction marker used by hunting.
     const auto coat = coat_colors[look.faction()];
@@ -644,11 +764,63 @@ void Panel::plant_blade(int x, int y, int height, int slant, int lean, std::uint
     }
 }
 
+int Panel::shown_plants(int index) {
+    // Plants step toward their real amount one unit every 70 ms, so a grazed
+    // clump shrinks over a few frames and growth fills in rather than popping.
+    auto& entry = plants_shown_[(index / width % plant_rows) * plant_columns + index % width % plant_columns];
+    const int actual = state_.cells[index].plants;
+    if (entry.index != index) {
+        entry = {static_cast<std::uint16_t>(index), static_cast<std::uint8_t>(actual), now_ms_};
+    } else if (entry.plants == actual) {
+        entry.stepped_at = now_ms_;
+    } else if (now_ms_ - entry.stepped_at >= 70) {
+        entry.plants = static_cast<std::uint8_t>(entry.plants + (entry.plants < actual ? 1 : -1));
+        entry.stepped_at = now_ms_;
+    }
+    return entry.plants;
+}
+
+int Panel::grazing_age(int index) const {
+    int age = -1;
+    for (const auto& graze : grazing_) {
+        if (graze.active && graze.cell == index && now_ms_ - graze.at < grazing_visible) {
+            const int since = static_cast<int>(now_ms_ - graze.at);
+            age = age < 0 ? since : std::min(age, since);
+        }
+    }
+    return age;
+}
+
+void Panel::draw_grazing(int tile) {
+    // Bits of leaf fly from a creature's mouth as it grazes.
+    for (const auto& graze : grazing_) {
+        const auto age = now_ms_ - graze.at;
+        if (!graze.active || age >= 420) {
+            continue;
+        }
+        const auto origin = cell_origin(graze.cell, tile);
+        const int px = origin[0] - camera_.left + tile / 2, py = origin[1] - camera_.top + tile * 5 / 8;
+        const int spread = 1 + static_cast<int>(age) / (tile == 16 ? 70 : 110);
+        const int rise = static_cast<int>(age) / (tile == 16 ? 60 : 100);
+        const auto color = age < 210 ? grass_greens.tip : dim(grass_greens.mid);
+        const auto seed = mix(graze.cell, graze.at);
+        const int bits = tile == 16 ? 3 : 2;
+        for (int i = 0; i < bits; ++i) {
+            const int side = i % 2 ? 1 : -1;
+            const int wobble = static_cast<int>((seed >> (4 * i)) % 3) - 1;
+            pixel(px + side * (spread + i / 2) + wobble, py - rise - i / 2 + static_cast<int>(age * age / 60000), color);
+        }
+    }
+}
+
 void Panel::plant_sprite(int x, int y, int tile, int index) {
     const auto& cell = state_.cells[index];
     const auto hash = mix(static_cast<std::uint32_t>(index), 0x2545f491u);
     const auto biome = cell.biome();
-    const int plants = cell.plants;
+    const int plants = shown_plants(index);
+    // A grazed plant jerks back and forth as it is bitten.
+    const int grazed = grazing_age(index);
+    const int flick = grazed < 0 ? 0 : ((grazed / 80) % 2 ? 2 : -2) * (int(grazing_visible) - grazed) / int(grazing_visible);
     const int detritus = static_cast<int>(cell.detritus());
     const bool detail = tile == 16;
     // Grass dries to straw toward the scrub edge at moisture 56; above 96 it stays green.
@@ -666,7 +838,7 @@ void Panel::plant_sprite(int x, int y, int tile, int index) {
             pixel(x + 3, y + 2, dim(tip));
             return;
         }
-        const int sway = plant_lean(index, hash) / 2;
+        const int sway = std::clamp((plant_lean(index, hash) + flick) / 2, -1, 1);
         if (tile == 8) {
             const int sx = x + std::clamp(shift, 0, 1);
             fill(sx + 2, y + 4, 1, 3, stem);
@@ -767,7 +939,7 @@ void Panel::plant_sprite(int x, int y, int tile, int index) {
         const int bx = x + (detail ? 2 + slot * 4 + static_cast<int>(bits % 4) : 1 + slot * 3 + static_cast<int>(bits % 3));
         const int by = y + (detail ? 7 + static_cast<int>((bits >> 3) % 9) : 3 + static_cast<int>((bits >> 3) % 5));
         const int size = std::max(0, growth - t);
-        const int lean = std::clamp(plant_lean(index, bits), detail ? -3 : -2, detail ? 3 : 2);
+        const int lean = std::clamp(plant_lean(index, bits) + flick, detail ? -3 : -2, detail ? 3 : 2);
         switch (biome) {
         case Biome::grassland: {
             // A tussock of blades fanning from one base, with seed heads when lush.
@@ -1162,8 +1334,7 @@ void Panel::draw_environment(int tile) {
             });
             if (cell.carcass() && !collapsing) {
                 if (tile >= 8) {
-                    const int scale = tile / 8;
-                    fill(px + 2 * scale, py + 5 * scale, 4 * scale, 2 * scale, carrion_color);
+                    draw_remains(px, py, tile, index);
                 } else if (tile == 4) {
                     fill(px, py + 3, 2, 1, carrion_color);
                 } else {
@@ -1171,6 +1342,58 @@ void Panel::draw_environment(int tile) {
                 }
             }
         }
+    }
+}
+
+void Panel::draw_remains(int x, int y, int tile, int index, bool bare) {
+    // A fresh carcass is a body-sized lump with ribs showing; once scavengers and
+    // decay take it below five units, only bones remain.
+    const auto& cell = state_.cells[index];
+    const bool fresh = !bare && cell.fresh_carcass();
+    const bool flip = mix(static_cast<std::uint32_t>(index), 0x6d2b79f5u) & 1;
+    const auto put = [&](int col, int row, int w, std::uint16_t color) {
+        fill(x + (flip ? tile - col - w : col), y + row, w, 1, color);
+    };
+    const auto bone = bare ? bone_dim : bone_color;
+    if (tile == 8) {
+        if (fresh) {
+            put(2, 5, 4, meat_color);
+            put(1, 6, 6, meat_dark);
+            put(3, 5, 1, bone_color);
+            put(5, 5, 1, bone_dim);
+            put(6, 5, 1, meat_color);
+        } else {
+            put(1, 6, 1, bone);
+            put(2, 6, 4, bone_dim);
+            put(3, 5, 1, bone);
+            put(5, 5, 1, bone);
+            put(6, 6, 1, bone);
+        }
+        return;
+    }
+    if (fresh) {
+        put(5, 10, 5, meat_color);
+        put(3, 11, 9, meat_color);
+        put(2, 12, 11, meat_color);
+        put(3, 13, 9, meat_dark);
+        for (const int col : {5, 7, 9}) {
+            put(col, 11, 1, bone_color);
+            put(col, 12, 1, bone_dim);
+        }
+        put(12, 11, 2, bone_color);
+        put(13, 10, 1, bone_dim);
+    } else {
+        put(3, 12, 9, bone_dim);
+        for (const int col : {4, 6, 8, 10}) {
+            put(col, 12, 1, bone);
+        }
+        for (const int col : {5, 7, 9}) {
+            put(col, 11, 1, bone);
+            put(col, 13, 1, bone_dim);
+        }
+        put(12, 11, 2, bone);
+        put(12, 12, 2, bone);
+        put(13, 11, 1, rgb565(40, 32, 30));
     }
 }
 
@@ -1195,15 +1418,13 @@ void Panel::draw_deaths(int tile) {
                 detail_sprite(px, py, actor.look, actor.face_right, false, false, fading, height);
             } else {
                 sprite(px, py, 1, actor.look.shape(), actor.face_right, false, false,
-                       fading, actor.look.faction(), height);
+                       fading, actor.look.faction(), height, build_of(actor.look));
             }
-        } else {
-            const bool remains = state_.cells[actor.cell].carcass();
-            const int scale = tile / 8;
-            const auto left = death_visible - age;
-            const int w = remains ? 4 * scale : std::max(1, int(left * 4 * scale / (death_visible - collapse_time - delay)));
-            fill(px + 2 * scale, py + 5 * scale, w, remains ? 2 * scale : scale,
-                 remains ? carrion_color : dim(carrion_color));
+        } else if (state_.cells[actor.cell].carcass()) {
+            draw_remains(px, py, tile, actor.cell);
+        } else if (age < (death_visible + collapse_time + delay) / 2) {
+            // Eaten already: a moment of bare bones before they fade.
+            draw_remains(px, py, tile, actor.cell, true);
         }
     }
 }
@@ -1316,7 +1537,8 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
         if (detail) {
             detail_sprite(px, py, creature.look, face_right, walking, bite, color);
         } else {
-            sprite(px, py, 1, creature.look.shape(), face_right, walking, bite, color, creature.look.faction());
+            sprite(px, py, 1, creature.look.shape(), face_right, walking, bite, color, creature.look.faction(), 7,
+                   build_of(creature.look));
         }
         if (bite) {
             pixel(px + (face_right ? tile - 1 : 0), py + (detail ? 11 : 4),
@@ -1324,6 +1546,7 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
         }
     }
     draw_contact(tile);
+    draw_grazing(tile);
     if (weather_enabled_ && rain_enabled_) {
         draw_weather(tile);
     }

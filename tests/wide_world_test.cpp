@@ -587,6 +587,8 @@ void check_older_checkpoint() {
     // 64-bit fields) resumes exactly. So does a storm-free copy saved as version 15.
     for (const bool storms : {true, false}) {
         auto config = petri::observatory_config();
+        // Versions before 18 predate morphology.
+        config.morphology = false;
         config.storm_fronts = storms;
         auto original = std::make_unique<petri::World>(14, config);
         for (int tick = 0; tick < 1500; ++tick) {
