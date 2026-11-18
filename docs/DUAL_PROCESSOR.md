@@ -1,6 +1,6 @@
 # Petri dual-processor architecture
 
-**Status:** Design decision, November 18, 2026. Stages 1 through 4 are done;
+**Status:** Design decision, November 18, 2026. Stages 1 through 5 are done;
 the rest is not implemented yet. Values marked *verify* are unconfirmed on
 this board.
 
@@ -94,22 +94,53 @@ Each chip gets one coherent job.
 ## Link protocol
 
 The SAMD51 is the SPI master and the ESP32 is the slave, the same roles the
-stock coprocessor firmware uses. The ESP32 drives `ESP_BUSY` to say when a
-transaction is ready.
-ESP-IDF documents a 10 MHz ceiling for SPI slave mode on the classic ESP32
-(*verify*), which still leaves far more than the needed bandwidth.
+stock coprocessor firmware uses. `link/link.hpp` defines the frames. Stage 5
+measured the link on the board (see the README's SPI link test).
 
-- Every packet carries a magic number, version, type, sequence number, length,
-  and a CRC-32 checksum. A receiver drops bad packets and resynchronizes on
-  the next magic number.
-- Packet types: frame, camera and input command, telemetry, checkpoint chunk
-  and acknowledgment, history record, and hello and reset notices.
-- The packet bodies reuse the existing `PTR4` observation and `PanelInput`
-  formats where possible. The same command and telemetry messages travel
-  over USB, BLE, and the link.
-- If either chip resets, the other notices the missing hello or heartbeat
-  and returns to a known state. The SAMD51 keeps showing the last frame and
-  sets a status color on the NeoPixel until the ESP32 returns.
+| Signal | SAMD51 | ESP32 |
+| --- | --- | --- |
+| SCK | 34 (`SPIWIFI`) | GPIO18 |
+| MOSI | 36 | GPIO14 |
+| MISO | 35 | GPIO23 |
+| Chip select | 33 (`SPIWIFI_SS`) | GPIO5 |
+| Ready (active low) | 31 (`SPIWIFI_ACK`), input | GPIO33, output |
+| ESP32 reset | 30 (`ESP32_RESETN`), output | EN |
+
+The ESP32 pins come from Adafruit nina-fw `boards/esp32/board.h`. Its GPIO15
+and GPIO21 connect to the SAMD51's SWD pins and must stay inputs. MOSI and
+MISO pass through the ESP32 GPIO matrix rather than IO_MUX, which limits MISO
+timing.
+
+- **Handshake.** The ESP32 queues one fixed 4,112-byte transaction (16-byte
+  header and up to 4,096 payload bytes) and drives ready low from the SPI
+  driver's post-setup callback. The SAMD51 waits for ready, selects the ESP32,
+  and clocks the whole frame with DMA. A chip-select interrupt on the ESP32
+  drives ready high again. Every transaction moves one frame in each
+  direction.
+- **Frames.** Each carries a magic number, version, type, sequence number,
+  acknowledged sequence, length, flags, and a CRC-32 over the header and
+  payload. A sequence that restarts at 0 marks a restarted peer.
+- **Fixed settings.** SPI mode 0 at 8 MHz. Mode 1, which ESP-IDF recommends
+  with DMA, failed above 6 MHz. Mode 0 failed at 12 MHz, the next step the
+  SAMD51 can produce. Both sides use these values from reset. A hardware
+  reset clears the ESP32's RTC memory, so no link setting may depend on
+  remembered ESP32 state.
+- **Bandwidth.** 176 frames/s, 721 KB/s of payload each way. A 4 KiB panel
+  frame at 20 frames/s uses about 11% of the link.
+- **Recovery.** After an ESP32 hardware reset or software restart, frames
+  resume in 291 ms or 310 ms. The SAMD51 keeps showing the last frame and
+  sets a status color on the NeoPixel until frames return.
+- **The ESP32 does not survive a SAMD51 reset.** The board pulls the ESP32
+  reset line low whenever the SAMD51 is not driving it. A released pin read 0
+  and the ESP32 rebooted. That happens on every SAMD51 reset, bootloader
+  entry, and UF2 flash. The world's only continuity across a SAMD51 restart is
+  therefore its latest checkpoint. The SAMD51 firmware should drive reset high
+  early, and it should request a checkpoint before any planned restart or
+  update.
+- Packet types still to add: frame, camera and input command, telemetry,
+  checkpoint chunk and acknowledgment, history record, and hello notices.
+  Where possible, their bodies reuse the `PTR4` observation and `PanelInput`
+  formats, so the same messages travel over USB, BLE, and the link.
 - The UART carries boot messages and debugging output, and it remains the
   ESP32 flashing path.
 
@@ -175,8 +206,12 @@ Each stage ends with something measured on hardware or checked by a test.
      in place.
    - The ESP32 now holds the self-test app instead of nina-fw. The Petri
      firmware does not use the ESP32 yet.
-5. **Link.** Bring up SPI master and slave with the handshake, checksums,
-   and reset recovery. Measure throughput and error rate under load.
+5. **Link.** *Done.* `link/` holds the frame format and its tests. The link
+   test apps are `esp32` (`sdkconfig.defaults.link`) and `firmware/linktest`.
+   In a 3-minute soak at 8 MHz in mode 0, 31,639 frames crossed with no
+   errors in either direction while the observatory world ran on core 1 at
+   207–268 ticks/s. Recovery and the reset-line finding are under Link
+   protocol.
 6. **Cutover.** Make the ESP32 world authoritative, display streamed frames,
    save checkpoints to QSPI, and relay companion USB traffic. Run a
    multi-hour soak and a power-cut test.

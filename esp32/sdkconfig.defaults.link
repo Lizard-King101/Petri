@@ -1,0 +1,2 @@
+# Layer on sdkconfig.defaults for the SPI link test.
+CONFIG_PETRI_APP_LINKTEST=y

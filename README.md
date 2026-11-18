@@ -898,6 +898,40 @@ controller. NimBLE advertising used about 96 KB of byte-addressable heap and
 47 KB of IRAM heap. Simulation timing did not change, because NimBLE runs on
 core 0.
 
+### SPI link test
+
+`link/link.hpp` defines the fixed 4,112-byte frame the SAMD51 and ESP32
+exchange over SPI. `firmware/linktest` is the SAMD51 master, and the
+`esp32` project built with `sdkconfig.defaults.link` is the ESP32 slave. The
+slave also steps the observatory world on core 1. The master reports once a
+second over USB and accepts `clock <hz>`, `mode <0-3>`, `reset`, `restart`,
+`float`, and `clear`.
+
+```sh
+firmware/build_petri_uf2.sh /path/to/uf2conv.py build/petri-linktest-samd51.uf2 --linktest
+cd esp32
+idf.py -B build-link -DSDKCONFIG=build-link/sdkconfig \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.link" build
+idf.py -B build-link -DSDKCONFIG=build-link/sdkconfig -p /dev/ttyACM0 -b 460800 flash
+```
+
+Results on November 18, 2026, with 15 seconds per setting:
+
+| SPI clock | Mode 1 | Mode 0 |
+| ---: | --- | --- |
+| 2.4–4.8 MHz | No errors, 65–118 frames/s | No errors, 65–118 frames/s |
+| 6 MHz | No errors, 141 frames/s | No errors, 141 frames/s |
+| 8 MHz | SAMD51 decoded no frames | No errors, 176 frames/s (721 KB/s each way) |
+| 12 MHz and 24 MHz | SAMD51 decoded no frames | SAMD51 decoded no frames |
+
+In every failing setting the ESP32 still received valid frames. Only
+ESP32-to-SAMD51 data failed. A 3-minute soak at 8 MHz in mode 0 moved
+31,639 frames with no CRC, pattern, sequence, or timeout errors in either
+direction. Five hardware resets and five software restarts of the ESP32 each
+recovered, in 291 ms and about 309 ms. The board holds the ESP32 in reset
+whenever the SAMD51 releases that pin, so a SAMD51 reset always restarts the
+ESP32.
+
 ### Panel and button test
 
 Copy `build/petri-panel-test.uf2` to MATRIXBOOT. After the board restarts, the

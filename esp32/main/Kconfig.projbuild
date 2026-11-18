@@ -1,5 +1,17 @@
 menu "Petri"
 
+choice PETRI_APP
+    prompt "Application"
+    default PETRI_APP_SELFTEST
+
+config PETRI_APP_SELFTEST
+    bool "Core self-test"
+
+config PETRI_APP_LINKTEST
+    bool "SPI link test with the SAMD51"
+
+endchoice
+
 config PETRI_BLE_ADVERTISE
     bool "Advertise over Bluetooth LE with NimBLE during the self-test"
     depends on BT_NIMBLE_ENABLED
