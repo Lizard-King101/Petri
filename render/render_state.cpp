@@ -21,8 +21,16 @@ RenderActor actor_of(const Creature& creature) {
 Look look_of(const Genome& genes) {
     const int back = 7 - (Genome::maximum - genes.thrift) / 5;
     const auto body = static_cast<unsigned>(biome_at(genes.preferred_moisture()));
-    return {static_cast<std::uint32_t>(static_cast<unsigned>(diet_shape(genes)) | body << 2 |
-                                       unsigned(std::clamp(back, 4, 7) - 4) << 4 | (genes.faction & 7u) << 6)};
+    std::uint32_t bits = static_cast<unsigned>(diet_shape(genes)) | body << 2 |
+                         unsigned(std::clamp(back, 4, 7) - 4) << 4 | (genes.faction & 7u) << 6;
+    if (genes.body_size) {
+        const auto clamped = [](unsigned gene) {
+            return std::clamp<unsigned>(gene, Genome::minimum, Genome::maximum) - 1;
+        };
+        bits |= 1u << 9 | clamped(genes.body_size) / 2 << 10 | (clamped(genes.pigment) + 1) << 13 |
+                clamped(genes.pattern) / 4 << 17 | clamped(genes.limbs) / 4 << 19;
+    }
+    return {bits};
 }
 
 RenderCell render_cell(const World& world, std::size_t index) {

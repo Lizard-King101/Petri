@@ -59,7 +59,9 @@ Version 15 also stores the climate seed and regional rainfall state.
 Version 16 holds 320 creature slots instead of 160 and stores IDs and
 lifetime counters at their 32-bit widths, which keeps the 128×64 checkpoint
 at 92,938 bytes, inside a 96 KiB QSPI slot. Versions 1–15 load into the
-first 160 slots, and the rest of the pool starts empty.
+first 160 slots, and the rest of the pool starts empty. Version 17 adds the
+morphology settings and four morphology genes per slot (94,220 bytes at
+128×64). Version 16 files resume with morphology off.
 Checkpoint size depends on world dimensions.
 The file ends with a 64-bit FNV-1a
 checksum. Load validates the checksum and state, rebuilds occupancy and
@@ -85,7 +87,7 @@ persistence milestone.
 
 ## Memory layout
 
-`World` occupies 37,688 bytes in the 64×32 build and 84,568 bytes in the
+`World` occupies 38,976 bytes in the 64×32 build and 85,856 bytes in the
 128×64 build. With 160 slots it took 26,552 and 72,664 bytes, down from
 41,392 and 109,008.
 
@@ -96,7 +98,8 @@ persistence milestone.
   `detritus_clipped`. That counter is not stored in checkpoints.
 - Cell occupancy uses nine bits per cell: a byte plus one bit packed eight
   cells to a byte. Fruiting shrubs use half a byte.
-- Each creature slot uses 64 bytes. IDs and lifetime counters are 32 bits.
+- Each creature slot uses 68 bytes, 4 of them for the morphology genes. IDs
+  and lifetime counters are 32 bits.
   If all 2³²−1 IDs are used, further births count as capacity blocks.
 - Fingerprints and `PTR4` observations keep their earlier 64-bit fields.
   Checkpoints did until version 16. Loading rejects IDs above 2³²−1 and
@@ -145,6 +148,8 @@ exactly.
 | `PTR4` observation buffer | 12,805 | 21,445 |
 | Checkpoint | 89,738 | 92,938 |
 
+The figures are from before the morphology genes, which add 4 bytes per
+slot: the 128×64 `World` is now 85,856 bytes and its checkpoint 94,220.
 The render state grew because `Look` is now 32 bits. Native speed did not
 change measurably: 26,616 ticks/s for the seed 14 observatory world, against
 27,887 before the change and 25,907 before the environment early-outs.
@@ -328,6 +333,42 @@ The native observatory and current firmware enable regional weather.
 The [long environment comparison](docs/experiments/README.md#regional-weather-and-succession)
 records changes in habitat, shrubs, population, and the conserved material
 budget on matched seeds.
+
+## Morphology genes
+
+`--morphology` (with `--food-web`) gives each creature four more heritable
+genes: body size, pigment, pattern, and limbs. Each one changes what the
+creature can do and has a cost:
+
+- **Body size** raises the bite and the energy store and helps both to
+  catch prey and to resist capture. It costs upkeep, and larger parents
+  must store more before breeding, because young are provisioned in
+  proportion to body size.
+- **Pigment** is causal camouflage. Prey whose pigment matches the ground
+  under it is harder to catch and is seen only at closer range. A strong
+  mismatch makes it easier to catch. No pigment matches every habitat.
+- **Pattern** hides prey in dense vegetation and shows it on bare ground,
+  where a plain coat hides better.
+- **Limbs** set foraging speed: long limbs sometimes take a second paid
+  step, and short ones sometimes miss a step. They also help in chases and
+  escapes. They cost upkeep.
+
+`--neutral-morphology` is the matched control: the genes are inherited and
+mutate but do nothing, and the ecology is then identical to a run without
+`--morphology`. In matched 200,000-tick runs, camouflage and plain coats
+were selected only where hunting was common. Body size rose under
+predation in the rich 64×32 food web and fell, with a much narrower spread
+than the control's, in the lean observatory world. Limbs lengthened in the
+64×32 world. The [morphology experiment](docs/experiments/README.md#morphology-genes)
+has the rules, numbers, and commands.
+
+```sh
+./build/petri --seed 5 --nutrients 80 --food-web --predation --adaptive-hunts --morphology --ticks 200000
+```
+
+The genes appear in each creature's `Look` (bits 9–20, documented in
+`render/render_state.hpp`) so the renderer can draw them. The panel does
+not draw them yet, and the observatory configuration leaves morphology off.
 
 ## Earlier plant-only experiments
 

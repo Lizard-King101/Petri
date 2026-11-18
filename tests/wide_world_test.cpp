@@ -584,7 +584,9 @@ void check_older_checkpoint() {
     }
     auto current = std::make_unique<petri::Checkpoint>();
     original->save_checkpoint(*current);
-    const auto old = petri::compat::to_version15(*current);
+    const auto version16 = petri::compat::to_version16(*current);
+    check(version16 != nullptr, "The observatory test world used morphology");
+    const auto old = petri::compat::to_version15(*version16);
     check(old != nullptr, "The observatory test world used a slot past 160");
     auto restored = std::make_unique<petri::World>(1);
     check(restored->load_checkpoint(*old), "A version 15 observatory checkpoint was rejected");

@@ -95,6 +95,10 @@ bool read_checkpoint(const char* path, petri::World& world) {
         petri::WeatherCheckpoint data;
         return read(data);
     }
+    if (length == petri::CapacityCheckpoint{}.size()) {
+        petri::CapacityCheckpoint data;
+        return read(data);
+    }
     petri::Checkpoint data;
     return length == data.size() && read(data);
 }
@@ -144,6 +148,47 @@ Diet diet(const petri::Creature& creature) {
 bool meat_specialist(const petri::Creature& creature) {
     return creature.genes.meat_digestion() >= 10 && diet(creature) == Diet::animal;
 }
+
+struct MorphologySummary {
+    double body_size = 0, pigment = 0, pattern = 0, limbs = 0, tone = 0, mismatch = 0;
+    unsigned matched = 0;
+
+    // Means over living creatures. A creature is matched when its pigment is
+    // within two steps of the ground it stands on.
+    static MorphologySummary of(const petri::World& world) {
+        MorphologySummary summary;
+        unsigned living = 0;
+        for (const auto& creature : world.creatures()) {
+            if (!creature.alive()) {
+                continue;
+            }
+            ++living;
+            const auto& genes = creature.genes;
+            const int tone = petri::background_tone(world.cells()[creature.cell].moisture);
+            const int mismatch = std::abs(int(genes.pigment) - tone);
+            summary.body_size += genes.body_size;
+            summary.pigment += genes.pigment;
+            summary.pattern += genes.pattern;
+            summary.limbs += genes.limbs;
+            summary.tone += tone;
+            summary.mismatch += mismatch;
+            summary.matched += mismatch <= 2;
+        }
+        if (living) {
+            for (auto* value : {&summary.body_size, &summary.pigment, &summary.pattern, &summary.limbs,
+                                &summary.tone, &summary.mismatch}) {
+                *value /= living;
+            }
+        }
+        return summary;
+    }
+
+    void print() const {
+        std::cout << " mean_body_size=" << body_size << " mean_pigment=" << pigment << " mean_pattern=" << pattern
+                  << " mean_limbs=" << limbs << " mean_background_tone=" << tone
+                  << " mean_pigment_mismatch=" << mismatch << " pigment_matched=" << matched;
+    }
+};
 
 bool hunter(const petri::Creature& creature) {
     return creature.prey_killed && creature.animal_eaten > creature.plants_eaten &&
@@ -261,6 +306,9 @@ struct RunReport {
         if (world.faction_markers()) {
             print_counts("faction_population", faction_population);
         }
+        if (world.morphology() && metrics.population) {
+            MorphologySummary::of(world).print();
+        }
         std::cout << '\n';
         births.fill(0);
         hunter_births = grazer_births = 0;
@@ -303,7 +351,7 @@ void usage(std::ostream& out) {
            "[--provisioning] [--adaptive-hunts] [--passive-prey] [--kin-avoidance] [--kin-strength 0-20] "
            "[--resemblance-strength 0-20] [--protect-similar-prey] [--hunt-threshold 0-160] [--chase-cost 0-160] "
            "[--faction-markers] [--cross-faction-hunts] [--staggered-growth] [--fruiting-plants] "
-           "[--dynamic-environment] [--neutral] | petri --load PATH\n"
+           "[--dynamic-environment] [--morphology] [--neutral-morphology] [--neutral] | petri --load PATH\n"
         << "For either form: [--ticks UINT64] [--until-births UINT64] [--save PATH] [--lineage-every TICKS] [--hunt-every TICKS] [--benchmark]\n";
 }
 
@@ -328,6 +376,7 @@ int main(int argc, char** argv) {
     bool faction_markers = false, cross_faction_hunts = false;
     bool staggered_growth = false, fruiting_plants = false;
     bool dynamic_environment = false;
+    bool morphology = false, neutral_morphology = false;
     bool hunt_tuning_supplied = false, kin_tuning_supplied = false;
     bool protect_similar_prey = false;
     unsigned hunt_threshold = petri::HuntTuning::default_threshold;
@@ -411,6 +460,12 @@ int main(int argc, char** argv) {
         }
         if (option == "--dynamic-environment") {
             dynamic_environment = custom_start = true;
+            continue;
+        }
+        if (option == "--morphology" || option == "--neutral-morphology") {
+            morphology |= option == "--morphology";
+            neutral_morphology |= option == "--neutral-morphology";
+            custom_start = true;
             continue;
         }
         if (i + 1 < argc) {
@@ -508,6 +563,10 @@ int main(int argc, char** argv) {
         std::cerr << "--dynamic-environment requires --connected-biomes.\n";
         return 2;
     }
+    if ((morphology && !food_web) || (neutral_morphology && !morphology)) {
+        std::cerr << "--morphology requires --food-web. --neutral-morphology requires --morphology.\n";
+        return 2;
+    }
 
     petri::World world(seed, {static_cast<std::uint8_t>(nutrients), !neutral,
                              static_cast<std::uint8_t>(carcass_decay), static_cast<std::uint8_t>(initial_carrion),
@@ -516,7 +575,7 @@ int main(int argc, char** argv) {
                              {static_cast<std::uint8_t>(hunt_threshold), static_cast<std::uint8_t>(chase_cost)}, kin_avoidance,
                              {static_cast<std::uint8_t>(kin_strength), static_cast<std::uint8_t>(resemblance_strength),
                               protect_similar_prey}, faction_markers, cross_faction_hunts, staggered_growth, fruiting_plants,
-                              dynamic_environment});
+                              dynamic_environment, morphology, neutral_morphology});
     if (load_path && !read_checkpoint(load_path, world)) {
         std::cerr << "Could not read a valid checkpoint from " << load_path << '\n';
         return 1;
@@ -577,6 +636,12 @@ int main(int argc, char** argv) {
     }
     if (world.dynamic_environment()) {
         std::cout << " dynamic_environment=1";
+    }
+    if (world.morphology()) {
+        std::cout << " morphology=1 neutral_morphology=" << world.neutral_morphology();
+        if (metrics.population) {
+            MorphologySummary::of(world).print();
+        }
     }
     if (world.fruiting_plants()) {
         unsigned shrubs = 0, fruit_biomass = 0;

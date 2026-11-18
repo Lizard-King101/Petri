@@ -9,7 +9,7 @@
 namespace petri {
 namespace {
 
-constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 16};
+constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 17};
 
 // Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
@@ -124,6 +124,8 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
     for (const auto rain : rainfall_) {
         writer.put(rain);
     }
+    writer.put(std::uint8_t(morphology_));
+    writer.put(std::uint8_t(neutral_morphology_));
     writer.put(metrics_.ticks);
     writer.put(metrics_.births);
     writer.put(metrics_.deaths);
@@ -181,6 +183,10 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
         writer.put(creature.genes.kin_reluctance);
         writer.put(creature.genes.faction);
         writer.put(creature.packed_fruit);
+        writer.put(creature.genes.body_size);
+        writer.put(creature.genes.pigment);
+        writer.put(creature.genes.pattern);
+        writer.put(creature.genes.limbs);
     }
     writer.finish();
     return writer.total;
@@ -248,6 +254,10 @@ bool World::load_checkpoint(const FloraCheckpoint& checkpoint) {
 
 bool World::load_checkpoint(const WeatherCheckpoint& checkpoint) {
     return decode_checkpoint(checkpoint.data(), checkpoint.size(), 15);
+}
+
+bool World::load_checkpoint(const CapacityCheckpoint& checkpoint) {
+    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 16);
 }
 
 bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version) {
@@ -406,6 +416,15 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
                 return false;
             }
         }
+    }
+    if (version >= 17) {
+        const auto morphology = reader.get<std::uint8_t>();
+        const auto neutral = reader.get<std::uint8_t>();
+        if (morphology > 1 || neutral > 1 || (morphology && !decoded.food_web_) || (neutral && !morphology)) {
+            return false;
+        }
+        decoded.morphology_ = morphology != 0;
+        decoded.neutral_morphology_ = neutral != 0;
     }
     auto& metrics = decoded.metrics_;
     metrics.ticks = reader.get<std::uint64_t>();
@@ -576,6 +595,16 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         if (version >= 14) {
             creature.packed_fruit = reader.get<std::uint8_t>();
         }
+        if (version >= 17) {
+            creature.genes.body_size = reader.get<std::uint8_t>();
+            creature.genes.pigment = reader.get<std::uint8_t>();
+            creature.genes.pattern = reader.get<std::uint8_t>();
+            creature.genes.limbs = reader.get<std::uint8_t>();
+        }
+        const auto& genes = creature.genes;
+        const bool any_morphology = genes.body_size || genes.pigment || genes.pattern || genes.limbs;
+        const bool valid_morphology = valid_trait(genes.body_size) && valid_trait(genes.pigment) &&
+                                      valid_trait(genes.pattern) && valid_trait(genes.limbs);
         if (id_overflow) {
             return false;
         }
@@ -590,13 +619,17 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
                 creature.last_mate || creature.nest_ticks || creature.provisions() ||
                 creature.genes.guard_drive || creature.genes.provision_drive || creature.genes.hunting ||
                 creature.genes.evasion || creature.hunt_target || creature.prey_killed ||
-                creature.genes.kin_reluctance || faction) {
+                creature.genes.kin_reluctance || faction || any_morphology) {
                 return false;
             }
             continue;
         }
+        if (decoded.morphology_ ? !valid_morphology : any_morphology) {
+            return false;
+        }
         if (creature.id >= decoded.next_id_ || creature.cell >= decoded.cells_.size() ||
-            decoded.occupants_[creature.cell] >= 0 || creature.energy == 0 || creature.energy > 160 ||
+            decoded.occupants_[creature.cell] >= 0 || creature.energy == 0 ||
+            creature.energy > decoded.max_energy(creature) ||
             !valid_trait(creature.genes.digestion) || !valid_trait(creature.genes.thrift) ||
             creature.plants_eaten > metrics.plants_eaten || creature.animal_eaten > metrics.animal_eaten ||
             (decoded.connected_biomes_ ? !valid_trait(creature.genes.moisture_preference)

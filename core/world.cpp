@@ -188,6 +188,10 @@ constexpr std::uint32_t kin_trait_salt = 0xb94485a9u;
 constexpr std::uint32_t founder_faction_salt = 0xa2cf4c35u;
 constexpr std::uint32_t inherited_faction_salt = 0xd28fa43bu;
 constexpr std::uint32_t shrub_salt = 0x6d2b79f5u;
+// One salt per morphology gene, in the order body size, pigment, pattern, limbs.
+constexpr std::uint32_t morphology_salts[] = {0x1b873593u, 0xcc9e2d51u, 0xe6546b64u, 0x5bd1e995u};
+constexpr std::uint8_t Genome::*morphology_genes[] = {&Genome::body_size, &Genome::pigment, &Genome::pattern,
+                                                      &Genome::limbs};
 constexpr unsigned faction_mutation_denominator = 128;
 constexpr int shrub_min_foliage = 4;
 constexpr unsigned weather_duration = 4096;
@@ -250,6 +254,8 @@ World::World(std::uint32_t seed, Config config)
       staggered_growth_(config.staggered_growth || config.fruiting_plants || (connected_biomes_ && config.dynamic_environment)),
       fruiting_plants_(config.fruiting_plants),
       dynamic_environment_(connected_biomes_ && config.dynamic_environment),
+      morphology_(food_web_ && config.morphology),
+      neutral_morphology_(morphology_ && config.neutral_morphology),
       climate_seed_(dynamic_environment_ ? seed : 0) {
     occupants_.fill(-1);
     for (int index = 0; index < width * height; ++index) {
@@ -304,6 +310,15 @@ World::World(std::uint32_t seed, Config config)
         }
         if (kin_avoidance_) {
             creatures_[slot].genes.kin_reluctance = founder_trait(seed, id, kin_trait_salt);
+        }
+        if (morphology_) {
+            // Standing variation on separate draws, like the hunting traits. Pigment spans
+            // every background so that no habitat starts without a match.
+            auto& genes = creatures_[slot].genes;
+            genes.body_size = founder_trait(seed, id, morphology_salts[0]);
+            genes.pigment = static_cast<std::uint8_t>(1 + trait_roll(seed, id, morphology_salts[1]) % 15);
+            genes.pattern = founder_trait(seed, id, morphology_salts[2]);
+            genes.limbs = founder_trait(seed, id, morphology_salts[3]);
         }
         occupants_[cell] = slot;
         ++metrics_.population;
@@ -579,7 +594,7 @@ void World::update_creature(int slot, StepObserver observer) {
         const int difference = effective.preferred_moisture() - cell.moisture;
         return std::max(difference, -difference);
     };
-    const int bite_limit = 9 - effective.thrift / 4;
+    const int bite_limit = this->bite_limit(creature, effective);
     const int fiber_cost = food_web_ ? std::max(0, 8 - int(effective.digestion)) * 3 / 2 : 0;
     const auto plant_energy = [&](const Cell& cell) {
         // Digestion biased toward meat pays more to process plant fiber.
@@ -631,7 +646,7 @@ void World::update_creature(int slot, StepObserver observer) {
         const int open_nest = prey.nest_ticks ? 36 : 0;
         const int protection = prey.nest_ticks && guarded(prey) ? 52 : 0;
         return std::clamp(48 - prey.energy / 4 + (meat_digestion - 8) * 18 - vegetation_cover +
-                          open_nest - protection, 5, 92);
+                          open_nest - protection + body_odds(creature, prey), 5, 92);
     };
     const auto expected = [&](const Creature& prey) {
         if (prey.nest_ticks && prey.has_parent(creature.id)) {
@@ -665,7 +680,8 @@ void World::update_creature(int slot, StepObserver observer) {
     bool seeking_food = false;
     if (dynamic_environment_ && destination >= 0 && creature.energy < 85 &&
         std::max(meal(creature.cell), meal(destination)) <= minimum_meal_gain) {
-        constexpr int range = 4;
+        // Long limbs widen the search for food; short ones narrow it.
+        const int range = 4 + limb_reach(creature);
         const int x = creature.cell % width, y = creature.cell / width;
         int best = minimum_meal_gain;
         for (int yy = std::max(0, y - range); yy <= std::min(height - 1, y + range); ++yy) {
@@ -691,7 +707,9 @@ void World::update_creature(int slot, StepObserver observer) {
 
     // Thrift lowers upkeep but reduces the amount an organism can eat per tick.
     const int investment = adaptive_hunts_ && effective.hunting >= 11 ? 1 : 0;
-    int cost = 5 - effective.thrift / 4 + investment;
+    // A larger body and longer limbs cost upkeep, and smaller ones save it. Living always costs something.
+    const int body_cost = body_upkeep(creature);
+    int cost = std::max(1, 5 - effective.thrift / 4 + investment + body_cost);
     const int origin = creature.cell;
     int hunting_chance = 0;
     int captured_energy = 0;
@@ -729,12 +747,13 @@ void World::update_creature(int slot, StepObserver observer) {
             const int x = origin % width;
             const int y = origin / width;
             int best = 100 * (attack_cost + pursuit_cost + std::max(meal(origin), meal(destination) - 1));
-            for (int dy = -pursuit_range; dy <= pursuit_range; ++dy) {
+            const int range = pursuit_range + limb_reach(creature);
+            for (int dy = -range; dy <= range; ++dy) {
                 const int yy = y + dy;
                 if (yy < 0 || yy >= height) {
                     continue;
                 }
-                const int row_range = pursuit_range - std::max(dy, -dy);
+                const int row_range = range - std::max(dy, -dy);
                 for (int dx = -row_range; dx <= row_range; ++dx) {
                     const int xx = x + dx;
                     const int distance = grid_distance(x, y, xx, yy);
@@ -742,7 +761,8 @@ void World::update_creature(int slot, StepObserver observer) {
                         continue;
                     }
                     const int prey = occupants_[yy * width + xx];
-                    if (prey < 0) {
+                    // Prey that matches its background must be closer to be seen.
+                    if (prey < 0 || distance > range - concealment(creatures_[prey])) {
                         continue;
                     }
                     const int score = expected(creatures_[prey]) - distance * 240;
@@ -781,6 +801,10 @@ void World::update_creature(int slot, StepObserver observer) {
 
     bool captured = false;
     int chase_paid = 0, strike_paid = 0;
+    // Limb length sets foraging speed on a fixed schedule: short limbs sometimes
+    // miss a foraging step, and long limbs sometimes take a second.
+    const int stride = limb_stride(creature);
+    bool foraging_move = false;
     if (hunting_chance > 0) {
         if (adaptive_hunts_ && hunt_step >= 0) {
             creature.cell = hunt_step;
@@ -826,20 +850,42 @@ void World::update_creature(int slot, StepObserver observer) {
                 (connected_biomes_ && creature.energy < 85 && cells_[destination].moisture >= 32 &&
                  meal(origin) <= minimum_meal_gain &&
                  forage_value(destination) + 48 >= forage_value(origin)))) {
-        creature.cell = destination;
-        ++cost;
+        foraging_move = true;
+        if (stride >= 0) {
+            creature.cell = destination;
+            ++cost;
+        }
     }
-    const auto destination_biome = biome_at(cells_[creature.cell].moisture);
-    const auto preferred_biome = biome_at(effective.preferred_moisture());
-    const bool crossed = move_creature(slot, origin, captured);
+    bool crossed = move_creature(slot, origin, captured);
     if (creature.cell != origin) {
         destination = origin;
     }
+    if (foraging_move && stride > 0) {
+        // A second step, to a better neighbor of the new cell, at the usual cost.
+        const auto ahead = neighbors(creature.cell);
+        int next = -1;
+        for (unsigned i = 0; i < ahead.size(); ++i) {
+            const int candidate = ahead[(i + offset) % ahead.size()];
+            if (candidate >= 0 && occupants_[candidate] < 0 &&
+                (next < 0 || forage_value(candidate) > forage_value(next))) {
+                next = candidate;
+            }
+        }
+        if (next >= 0 && forage_value(next) > forage_value(creature.cell)) {
+            const int from = creature.cell;
+            creature.cell = static_cast<std::uint16_t>(next);
+            ++cost;
+            crossed |= move_creature(slot, from, false);
+            destination = from;
+        }
+    }
+    const auto destination_biome = biome_at(cells_[creature.cell].moisture);
+    const auto preferred_biome = biome_at(effective.preferred_moisture());
 
     const auto& local = cells_[creature.cell];
     const bool eating = !food_web_ || meal(creature.cell) > minimum_meal_gain;
     if (hunting_chance == 0 && creature.cell == origin && !eating) {
-        cost = fasting_upkeep + investment;
+        cost = std::max(1, fasting_upkeep + investment + body_cost);
     }
     if (connected_biomes_) {
         cost += habitat_distance(local) / 50;
@@ -879,7 +925,7 @@ void World::update_creature(int slot, StepObserver observer) {
     }
     if (observer.record_hunt_energy && (hunting_chance > 0 || hunt_step >= 0)) {
         const auto units = [](int value) { return static_cast<std::uint64_t>(value); };
-        const int cap_loss = std::max(0, energy - 160);
+        const int cap_loss = std::max(0, energy - max_energy(creature));
         observer.record_hunt_energy(observer.context,
             {units(chase_paid), units(strike_paid), units(cost - chase_paid - strike_paid),
              units(captured_energy), captured ? units(meal_energy) : 0,
@@ -889,7 +935,7 @@ void World::update_creature(int slot, StepObserver observer) {
         kill(creature, observer, DeathCause::depleted_energy);
         return;
     }
-    creature.energy = std::min(energy, 160);
+    creature.energy = std::min(energy, max_energy(creature));
     if (provisioning_ && young && young->nest_ticks && young->has_parent(creature.id) &&
         cell_distance(creature.cell, young->cell) == 1) {
         deliver_food(creature, *young, observer);
@@ -898,7 +944,9 @@ void World::update_creature(int slot, StepObserver observer) {
         if (can_mate(creature)) {
             reproduce_sexually(creature, observer);
         }
-    } else if (destination >= 0 && creature.energy >= (food_web_ ? food_web_reproduction_threshold : reproduction_threshold)) {
+    } else if (destination >= 0 &&
+               creature.energy >= body_share(food_web_ ? food_web_reproduction_threshold : reproduction_threshold,
+                                             creature)) {
         reproduce(creature, destination, observer);
     }
 }
@@ -1012,7 +1060,6 @@ void World::reproduce(Creature& parent, int destination, StepObserver observer) 
     } else if (carcass_decay_) {
         detritus -= body_mass;
     }
-    parent.energy -= reproduction_cost;
     *slot = {CreatureId(next_id_++), parent.id, parent.founder, parent.generation + 1,
              static_cast<std::uint16_t>(destination), offspring_energy,
              {mutate(parent.genes.digestion), mutate(parent.genes.thrift),
@@ -1024,13 +1071,19 @@ void World::reproduce(Creature& parent, int destination, StepObserver observer) 
     if (kin_avoidance_) {
         slot->genes.kin_reluctance = inherit_reluctance(parent, slot->id);
     }
+    if (morphology_) {
+        inherit_morphology(*slot, parent, nullptr);
+    }
+    // Young are provisioned in proportion to their body size.
+    slot->energy = static_cast<std::uint16_t>(body_share(offspring_energy, *slot));
+    parent.energy -= slot->energy + (reproduction_cost - offspring_energy);
     record_birth(*slot, parent, observer);
 }
 
 bool World::can_mate(const Creature& creature) const {
     const int receptivity = trait_effects_ ? creature.genes.receptivity : 8;
     return creature.breeding_cooldown == 0 && creature.nutrients_carried >= parental_material &&
-        creature.energy >= 124 - receptivity * 4;
+        creature.energy >= body_share(124 - receptivity * 4, creature);
 }
 
 int World::locate_mate(const Creature& creature) const {
@@ -1091,16 +1144,21 @@ void World::reproduce_sexually(Creature& parent, StepObserver observer) {
                        nests_ ? inherit(&Genome::provision_drive) : std::uint8_t{0},
                        adaptive_hunts_ ? inherit(&Genome::hunting) : std::uint8_t{0},
                        adaptive_hunts_ ? inherit(&Genome::evasion) : std::uint8_t{0}};
-    for (auto* contributor : {&parent, mate}) {
-        contributor->energy -= parental_energy;
-        contributor->nutrients_carried -= parental_material;
-        contributor->breeding_cooldown = Creature::recovery_ticks;
-    }
     *newborn = {CreatureId(next_id_++), parent.id, parent.founder, std::max(parent.generation, mate->generation) + 1,
                 static_cast<std::uint16_t>(nursery), offspring_energy, genes, 0, 0,
                 0, Excursion::none, Creature::maturity_ticks, mate->id};
     if (kin_avoidance_) {
         newborn->genes.kin_reluctance = inherit_reluctance(parent, newborn->id, mate);
+    }
+    if (morphology_) {
+        inherit_morphology(*newborn, parent, mate);
+    }
+    // Young are provisioned in proportion to their body size, half by each parent.
+    newborn->energy = static_cast<std::uint16_t>(body_share(offspring_energy, *newborn));
+    for (auto* contributor : {&parent, mate}) {
+        contributor->energy -= body_share(parental_energy, *newborn);
+        contributor->nutrients_carried -= parental_material;
+        contributor->breeding_cooldown = Creature::recovery_ticks;
     }
     if (nests_) {
         newborn->nest_ticks = Creature::nest_duration;
@@ -1163,6 +1221,84 @@ std::uint8_t World::inherit_reluctance(const Creature& parent, std::uint64_t chi
     const auto roll = trait_roll(rng_ ^ std::uint32_t(child >> 32), std::uint32_t(child), kin_trait_salt);
     const auto& source = mate && (roll & 1) ? *mate : parent;
     return mutate_trait(source.genes.kin_reluctance, (roll >> 1) % 8);
+}
+
+int World::bite_limit(const Creature& creature, const Genome& effective) const {
+    // Thrift limits the bite. Each two steps of body size from the founders'
+    // 8 add or remove one unit.
+    const int size = morphology_effects() ? creature.genes.body_size : 8;
+    return std::max(1, 9 - effective.thrift / 4 + (size - 8) / 2);
+}
+
+int World::max_energy(const Creature& creature) const {
+    // A larger body stores more energy for lean times, and a smaller one less.
+    return morphology_effects() ? 160 + 6 * (creature.genes.body_size - 8) : 160;
+}
+
+int World::body_upkeep(const Creature& creature) const {
+    if (!morphology_effects()) {
+        return 0;
+    }
+    // Each step of body size or limb length above 8 costs 1/32 of an energy
+    // unit per tick, and each step below saves as much. A shared 32-tick phase
+    // spreads the fractions evenly: the mean is exactly steps / 32.
+    const int steps = creature.genes.body_size + creature.genes.limbs - 16;
+    const int total = steps + static_cast<int>(metrics_.ticks % 32);
+    return total >= 0 ? total / 32 : -((31 - total) / 32);
+}
+
+int World::limb_stride(const Creature& creature) const {
+    if (!morphology_effects()) {
+        return 0;
+    }
+    // Over 16 ticks a creature with limbs L takes L - 8 extra steps when L > 8,
+    // or misses 8 - L steps when L < 8. The phase differs between creatures.
+    const int phase = static_cast<int>((metrics_.ticks + creature.id) % 16);
+    const int limbs = creature.genes.limbs;
+    return limbs > 8 && phase < limbs - 8 ? 1 : limbs < 8 && phase < 8 - limbs ? -1 : 0;
+}
+
+int World::limb_reach(const Creature& creature) const {
+    return morphology_effects() ? (creature.genes.limbs - 8) / 4 : 0;
+}
+
+int World::camouflage(const Creature& prey) const {
+    if (!morphology_effects()) {
+        return 0;
+    }
+    // Close matches to the ground hide the body; strong mismatches make it stand out.
+    const int mismatch = std::abs(int(prey.genes.pigment) - background_tone(cells_[prey.cell].moisture));
+    return mismatch <= 4 ? 4 - mismatch : -std::min(2, std::max(0, mismatch - 8));
+}
+
+int World::pattern_cover(const Creature& prey) const {
+    if (!morphology_effects()) {
+        return 0;
+    }
+    // A bold pattern breaks up the outline in dense vegetation and shows on bare
+    // ground. A plain coat does the reverse.
+    const int vegetation = std::min<int>(cells_[prey.cell].plants, 16) - 8;
+    return (prey.genes.pattern - 8) * vegetation / 4;
+}
+
+int World::body_odds(const Creature& hunter, const Creature& prey) const {
+    if (!morphology_effects()) {
+        return 0;
+    }
+    // Percentage points of capture chance: larger bodies overpower and longer
+    // limbs outrun, while camouflage and pattern hide the prey.
+    return 2 * (hunter.genes.body_size - prey.genes.body_size) + 2 * (hunter.genes.limbs - prey.genes.limbs) -
+           5 * camouflage(prey) - pattern_cover(prey);
+}
+
+void World::inherit_morphology(Creature& child, const Creature& parent, const Creature* mate) const {
+    // Separate draws keep the ecological random stream identical to a run without
+    // morphology, so the neutral control matches it exactly.
+    for (unsigned gene = 0; gene < 4; ++gene) {
+        const auto roll = trait_roll(rng_, child.id, morphology_salts[gene]);
+        const auto& source = mate && (roll & 1) ? *mate : parent;
+        child.genes.*morphology_genes[gene] = mutate_trait(source.genes.*morphology_genes[gene], (roll >> 1) % 8);
+    }
 }
 
 std::uint64_t World::fingerprint() const {
@@ -1302,6 +1438,15 @@ std::uint64_t World::fingerprint() const {
         add(climate_seed_);
         for (const auto rain : rainfall_) {
             add(rain);
+        }
+    }
+    if (morphology_) {
+        add(std::uint8_t(morphology_));
+        add(std::uint8_t(neutral_morphology_));
+        for (const auto& creature : creatures_) {
+            for (const auto gene : morphology_genes) {
+                add(creature.genes.*gene);
+            }
         }
     }
     return hash;

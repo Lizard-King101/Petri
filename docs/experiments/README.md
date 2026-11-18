@@ -410,3 +410,98 @@ c++ -std=c++17 -O3 -DNDEBUG -DPETRI_WIDE_WORLD=1 -I core -I render \
 ./build-wide/compare_environment 14 control build-wide/control14 > build-wide/control14.csv
 ./build-wide/compare_environment 14 dynamic build-wide/weather14 > build-wide/weather14.csv
 ```
+
+## Morphology genes
+
+`--morphology` (with `--food-web`) adds four heritable genes, each from 1 to
+15. Founders draw body size, pattern, and limbs from 5–11 and pigment from
+1–15 on separate seeded draws. Offspring copy each gene from one parent and
+mutate it by ±1 with probability 1/8 each way, clamped to 1–15, on draws
+that leave the ecological random stream untouched. Every effect is relative
+to 8, the founders' standard:
+
+| Gene | Benefit | Cost |
+| --- | --- | --- |
+| Body size | One bite unit per two steps above 8. Energy store 160 + 6 per step. Two capture points per step of size advantage, as hunter or as prey | 1/32 energy per tick per step above 8. Young are provisioned in proportion to the parent's store, and breeding thresholds scale with it |
+| Pigment | Prey within 4 tones of the ground under it is harder to catch (5 points per tone of match, up to 20) and is seen only closer than the hunter's range | Prey 9 or more tones off its ground is easier to catch, by up to 10 points. One pigment cannot match every habitat |
+| Pattern | A bold pattern hides prey in dense vegetation: up to 14 points at 16+ plants | The same pattern shows on bare ground, up to 14 points, where a plain coat hides instead |
+| Limbs | Over 16 ticks, L − 8 extra foraging steps (each paid for). Two capture points per step of limb advantage. Longer evasion reaction range, lunge and sprint at lower hunting skill, wider food search | 1/32 energy per tick per step above 8. Short limbs miss 8 − L foraging steps in 16 |
+
+The ground's tone is `moisture × 15 / 255`, so 0 is the driest scrub and
+15 the wettest marsh. Upkeep fractions are spread over a shared 32-tick
+cycle, so the mean cost is exact and the run stays integer-only. Upkeep
+never drops below 1.
+
+`--neutral-morphology` is the control. The genes are inherited and mutate
+in the same way but have no effect. Its ecology matches a run without
+`--morphology` exactly, which `tests/world_test.cpp` checks slot by slot.
+Without either flag, the 68 matched runs from the capacity change give
+byte-identical CLI output.
+
+Seeds 5–12 ran 200,000 ticks under each treatment in three ecologies. The
+64×32 food web used 80 nutrients, asexual reproduction, and adaptive
+hunting with evasion. Its no-predation variant dropped `--predation` and
+`--adaptive-hunts`. The 128×64 world was the observatory: 24 nutrients,
+irregular connected biomes, fruiting shrubs, factions, and weather. Values
+are means across seeds of the living population's means, ± the standard
+deviation across seeds. The count is how many of the 8 seeds moved the
+same way as the mean difference.
+
+| Ecology | Trait | Morphology | Neutral control | Seeds |
+| --- | --- | ---: | ---: | ---: |
+| 64×32 with predation | Body size | 9.9 ± 1.6 | 8.3 ± 1.4 | 6/8 larger |
+| | Limbs | 10.0 ± 0.8 | 7.4 ± 2.0 | 7/8 longer |
+| | Pattern | 4.9 ± 1.2 | 8.8 ± 1.6 | 8/8 plainer |
+| | Pigment mismatch | 3.4 ± 1.4 | 5.7 ± 1.4 | 7/8 closer |
+| | Kills | 1,273 ± 514 | 1,725 ± 524 | 5/8 fewer |
+| 64×32 without predation | Body size | 7.4 ± 1.5 | 7.5 ± 1.5 | 5/8 smaller |
+| | Limbs | 8.8 ± 0.9 | 7.4 ± 1.5 | 6/8 longer |
+| | Pattern | 8.5 ± 1.4 | 7.6 ± 2.0 | 6/8 bolder |
+| | Pigment mismatch | 4.6 ± 1.6 | 5.2 ± 1.4 | 5/8 closer |
+| 128×64 observatory | Body size | 6.2 ± 1.2 | 9.1 ± 4.2 | 6/8 smaller |
+| | Limbs | 8.0 ± 0.6 | 9.1 ± 2.5 | 5/8 shorter |
+| | Pattern | 6.7 ± 3.8 | 9.2 ± 3.8 | 5/8 plainer |
+| | Pigment mismatch | 4.5 ± 1.5 | 3.3 ± 0.7 | 6/8 farther |
+| | Kills | 4.5 ± 2.3 | 3.5 ± 1.1 | 4/8 more |
+
+Every population survived, and no run blocked a birth. Final 64×32
+populations were within 4% of the controls on average (101.5 against 105.6
+creatures with predation). Observatory populations ended 9% larger (63.0
+against 57.6), and one observatory run peaked at 264 creatures, past the
+old 160-slot limit.
+
+- **Camouflage is selected where hunting happens.** With predation, pigment
+  moved toward the ground the animals stand on in 7 of 8 seeds, and the
+  share within two tones of it rose by 22.6 creatures per run. Without
+  predation the shift was small and inconsistent (5 of 8 seeds). The
+  observatory world, with about four kills per 200,000 ticks, showed no
+  selection on pigment: its mismatch drifted, here away from the ground.
+  Kills fell by a quarter with camouflage, but only in 5 of 8 seeds.
+- **Pattern follows the ground under predation.** The animals stand mostly
+  on grazed cells, where a plain coat hides best, and every predation seed
+  went plainer. Without predation, pattern drifted the other way.
+- **Body size depends on the ecology.** It rose in the predation world,
+  where size helps both to catch and to resist capture, and was neutral
+  without predation. In the lean observatory world it fell to about 6, and
+  its spread across seeds was a third of the control's (1.2 against 4.2).
+  That points to stabilizing selection around a smaller body, not
+  only to drift.
+- **Limbs pay for foraging speed in the 64×32 world**, with and without
+  hunting, and settle near 8 in the observatory world, again with a much
+  smaller spread than the control (0.6 against 2.5).
+
+Earlier tunings were rejected. With upkeep of 1/16 per step and one bite
+unit per three size steps, body size fell to 1.4 in the 64×32 world and 2.3
+in the observatory world within 200,000 ticks, 64×32 limbs fell to 1.3, and
+the 64×32 populations more than doubled on the cheaper upkeep (239 against
+106). At 1/8 per step the collapse came sooner. Upkeep of 1/32 per step with one bite unit per two
+size steps is the setting recorded above.
+
+```sh
+python3 docs/experiments/compare_morphology.py build/petri --world compact --ticks 200000 \
+  --output build/morphology-compact.csv
+python3 docs/experiments/compare_morphology.py build/petri --world compact-no-predation --ticks 200000 \
+  --output build/morphology-no-predation.csv
+python3 docs/experiments/compare_morphology.py build-wide/petri --world wide --ticks 200000 \
+  --output build-wide/morphology-observatory.csv
+```

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -46,8 +47,11 @@ using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * he
 using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
 using WeatherCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
 // Version 16: 320 slots with 32-bit IDs and lifetime counters.
-inline constexpr std::size_t checkpoint_creature_bytes = 59;
-using Checkpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 +
+using CapacityCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 +
+                                                    capacity * 59 + 8>;
+// Version 17 adds the morphology settings and four morphology genes per slot.
+inline constexpr std::size_t checkpoint_creature_bytes = 63;
+using Checkpoint = std::array<std::uint8_t, 6 + 153 + climate_nodes + 15 * 8 + width * height * 9 +
                                             capacity * checkpoint_creature_bytes + 8>;
 // The SAMD51 keeps checkpoints in 96 KiB QSPI slots whose data starts at byte 256.
 static_assert(std::tuple_size<Checkpoint>::value <= 96 * 1024 - 256);
@@ -56,6 +60,11 @@ enum class Biome : std::uint8_t { scrub, grassland, wetland };
 
 constexpr Biome biome_at(unsigned moisture) {
     return moisture >= 128 ? Biome::wetland : moisture >= 56 ? Biome::grassland : Biome::scrub;
+}
+
+// A cell's background on the pigment gene's scale: 0 for the driest ground, 15 for the wettest.
+constexpr int background_tone(unsigned moisture) {
+    return static_cast<int>(moisture * 15 / 255);
 }
 
 struct Cell {
@@ -161,6 +170,9 @@ struct Genome {
     std::uint8_t hunting = 0, evasion = 0;
     std::uint8_t kin_reluctance = 0;
     std::uint8_t faction = 0;
+    // Morphology, present with Config::morphology. Founders' standard is 8, except
+    // pigment, which matches background_tone().
+    std::uint8_t body_size = 0, pigment = 0, pattern = 0, limbs = 0;
 
     int preferred_moisture() const { return 12 + moisture_preference * 12; }
 
@@ -297,6 +309,10 @@ struct Config {
     bool staggered_growth = false;
     bool fruiting_plants = false;
     bool dynamic_environment = false;
+    // Heritable body size, pigment, pattern, and limbs. Requires the food web.
+    bool morphology = false;
+    // The control: morphology genes are inherited and mutate but have no effect.
+    bool neutral_morphology = false;
 };
 
 class World {
@@ -326,6 +342,8 @@ public:
     bool staggered_growth() const { return staggered_growth_; }
     bool fruiting_plants() const { return fruiting_plants_; }
     bool dynamic_environment() const { return dynamic_environment_; }
+    bool morphology() const { return morphology_; }
+    bool neutral_morphology() const { return neutral_morphology_; }
     bool fruiting_shrub(std::size_t cell) const { return shrubs_[cell] != 0; }
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
     std::uint64_t fingerprint() const;
@@ -353,6 +371,7 @@ public:
     bool load_checkpoint(const FactionCheckpoint& checkpoint);
     bool load_checkpoint(const FloraCheckpoint& checkpoint);
     bool load_checkpoint(const WeatherCheckpoint& checkpoint);
+    bool load_checkpoint(const CapacityCheckpoint& checkpoint);
 
 private:
     World() = default;
@@ -402,6 +421,21 @@ private:
     void record_birth(Creature& newborn, const Creature& parent, StepObserver observer, const Creature* mate = nullptr);
     void kill(Creature& creature, StepObserver observer, DeathCause cause);
     std::uint8_t mutate(std::uint8_t trait);
+    // Morphology effects. Each is zero, or the founders' standard, unless the
+    // genes are expressed (see morphology_effects()).
+    bool morphology_effects() const { return morphology_ && trait_effects_ && !neutral_morphology_; }
+    int bite_limit(const Creature& creature, const Genome& effective) const;
+    int max_energy(const Creature& creature) const;
+    // An energy amount scaled by the creature's store: max_energy / 160 times `amount`.
+    int body_share(int amount, const Creature& creature) const { return amount * max_energy(creature) / 160; }
+    int body_upkeep(const Creature& creature) const;
+    int limb_reach(const Creature& creature) const;
+    int limb_stride(const Creature& creature) const;
+    int camouflage(const Creature& prey) const;
+    int concealment(const Creature& prey) const { return std::max(0, camouflage(prey)); }
+    int pattern_cover(const Creature& prey) const;
+    int body_odds(const Creature& hunter, const Creature& prey) const;
+    void inherit_morphology(Creature& child, const Creature& parent, const Creature* mate) const;
     std::uint8_t inherit_reluctance(const Creature& parent, std::uint64_t child,
                                     const Creature* mate = nullptr) const;
 
@@ -434,6 +468,7 @@ private:
     bool staggered_growth_ = false;
     bool fruiting_plants_ = false;
     bool dynamic_environment_ = false;
+    bool morphology_ = false, neutral_morphology_ = false;
     std::uint32_t climate_seed_ = 0;
 };
 

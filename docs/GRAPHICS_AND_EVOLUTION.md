@@ -1,7 +1,9 @@
 # Petri graphics and evolution plan
 
 **Status:** Plan, November 18, 2026. Follows the dual-processor cutover
-([DUAL_PROCESSOR.md](DUAL_PROCESSOR.md)). Nothing below is implemented yet.
+([DUAL_PROCESSOR.md](DUAL_PROCESSOR.md)). Simulation steps 1 and 2 are
+implemented natively and in the ESP32 build, not yet run on the board (see
+their notes below). The rest is not implemented yet.
 
 With the world on the ESP32 and the SAMD51 drawing from a render stream, each
 chip has room for its own job. This plan spends that room on two tracks that
@@ -69,12 +71,26 @@ baselines, and matched-seed experiments, as the README's experiments do.
      fast-forward, with fingerprints unchanged.
    - Raise creature capacity above 160. The creature record then needs to
      span several stream records.
+   - *Done natively, November 18, 2026.* The world app's static DRAM fell
+     from 115,732 to 15,908 bytes, and a world build with NimBLE links.
+     Early-outs in `recycle` and `grow_plants` are byte-identical across 68
+     matched runs and speed the native observatory world by 8%. Capacity is
+     320 (checkpoint version 16, 92,938 bytes at 128×64), with 16-bit slots
+     and slot-range creature records in the stream. See the README's memory
+     layout section and DUAL_PROCESSOR.md for the figures. Heap use with
+     Bluetooth up is not yet measured on the board.
 2. **Morphology genes with costs.**
    - Body size, which trades metabolism against bite, attack, and defense.
    - Pigment matched to the biome, which hides prey from hunters. This is
      causal camouflage, not decoration.
    - Pattern and limbs, which trade speed against cost.
    - Each gene maps to a visible part of `Look`.
+   - *Done natively, November 18, 2026* (`--morphology`, checkpoint version
+     17). Pattern hides prey in vegetation and shows it on bare ground;
+     limbs set foraging speed and chase odds. Matched runs with a neutral
+     control are in the experiments log. `Look` bits 9–20 carry the genes;
+     `render/render_state.hpp` documents the layout. The observatory
+     configuration leaves morphology off until the renderer draws it.
 3. **Neural controllers.**
    - A fixed-topology int8 network of about 12 inputs, 8 hidden units, and
      6 outputs, about 150 bytes per creature. It is inherited with mutation.

@@ -368,8 +368,9 @@ Each stage ends with something measured on hardware or checked by a test.
    - **Static DRAM.** The world app used 115,732 of 180,736 bytes of static
      DRAM. With Bluetooth the segment shrinks to 124,580 bytes, which would
      have left about 9 KB. The `World`, the event log, and the encoder's
-     shadow now live on the heap (November 18, 2026), and the world app uses
+     shadow now live on the heap (November 18, 2026), and the world app used
      14,564 bytes of static DRAM (`.bss` fell from 105,736 to 4,568 bytes).
+     The larger census buffer for 320 slots brings it to 15,908.
      At boot the app allocates the restore buffer first and then the world,
      while the heap is unfragmented. After the boot decision it frees the
      restore buffer and allocates the event log, the encoder, and the
@@ -377,9 +378,10 @@ Each stage ends with something measured on hardware or checked by a test.
      largest free block and stops the app. The BLE self-test build
      (`build-ble`) still links, at 26,936 of 124,580 bytes. A world-app
      build with the NimBLE defaults layered on (`sdkconfig.defaults.world`
-     then `sdkconfig.defaults.ble`) also links, at 27,712 of 124,580 bytes.
+     then `sdkconfig.defaults.ble`) also links, at 27,712 of 124,580 bytes (29,056 with the 320-slot census buffer).
      Heap use with Bluetooth running has not been measured
-     on the board.
+     on the board. With 320 slots and morphology the boot peak is two
+     blocks: the 94,220-byte restore buffer and the 85,856-byte world.
 8. **Graphics pass on the SAMD51.** Measure Protomatter color depth (5–6
    bitplanes), achievable frame rate, and interpolation smoothness. Then pick
    among day/night lighting, weather particles, animated water, and cached
