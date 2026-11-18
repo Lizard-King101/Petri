@@ -75,7 +75,7 @@ baselines, and matched-seed experiments, as the README's experiments do.
      from 115,732 to 15,908 bytes, and a world build with NimBLE links.
      Early-outs in `recycle` and `grow_plants` are byte-identical across 68
      matched runs and speed the native observatory world by 8%. Capacity is
-     320 (checkpoint version 16, 92,938 bytes at 128×64), with 16-bit slots
+     320 (checkpoint version 17, 92,938 bytes at 128×64), with 16-bit slots
      and slot-range creature records in the stream. See the README's memory
      layout section and DUAL_PROCESSOR.md for the figures. Heap use with
      Bluetooth up is not yet measured on the board.
@@ -86,7 +86,7 @@ baselines, and matched-seed experiments, as the README's experiments do.
    - Pattern and limbs, which trade speed against cost.
    - Each gene maps to a visible part of `Look`.
    - *Done natively, November 18, 2026* (`--morphology`, checkpoint version
-     17). Pattern hides prey in vegetation and shows it on bare ground;
+     18). Pattern hides prey in vegetation and shows it on bare ground;
      limbs set foraging speed and chase odds. Matched runs with a neutral
      control are in the experiments log. `Look` bits 9–20 carry the genes;
      `render/render_state.hpp` documents the layout. The observatory

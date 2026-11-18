@@ -9,7 +9,7 @@
 namespace petri {
 namespace {
 
-constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 17};
+constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 18};
 
 // Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
@@ -152,7 +152,7 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
         writer.put(shrubs_[index]);
     }
     for (const auto& creature : creatures_) {
-        // Version 16 stores IDs and lifetime counters at their 32-bit widths in memory.
+        // Since version 17, IDs and lifetime counters keep their 32-bit widths in memory.
         writer.put(creature.id);
         writer.put(creature.parent);
         writer.put(static_cast<std::uint8_t>(creature.founder));
@@ -257,7 +257,7 @@ bool World::load_checkpoint(const WeatherCheckpoint& checkpoint) {
 }
 
 bool World::load_checkpoint(const CapacityCheckpoint& checkpoint) {
-    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 16);
+    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 17);
 }
 
 bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version) {
@@ -417,7 +417,7 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
             }
         }
     }
-    if (version >= 17) {
+    if (version >= 18) {
         const auto morphology = reader.get<std::uint8_t>();
         const auto neutral = reader.get<std::uint8_t>();
         if (morphology > 1 || neutral > 1 || (morphology && !decoded.food_web_) || (neutral && !morphology)) {
@@ -490,8 +490,8 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         return false;
     }
     const auto total_creatures = decoded.next_id_ - 1;
-    // Versions before 16 stored 160 slots. The rest of the pool starts empty.
-    const bool narrow = version >= 16;
+    // Versions before 17 stored 160 slots. The rest of the pool starts empty.
+    const bool narrow = version >= 17;
     const int slots = narrow ? capacity : legacy_capacity;
     if (metrics.deaths > total_creatures || total_creatures - metrics.deaths > std::uint64_t(slots)) {
         return false;
@@ -532,7 +532,7 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
     decoded.occupants_.fill(-1);
     for (int slot = 0; slot < slots; ++slot) {
         auto& creature = decoded.creatures_[slot];
-        // Before version 16, IDs and counters were 64 bits. IDs are bounded by
+        // Before version 17, IDs and counters were 64 bits. IDs are bounded by
         // next_id_, which fits a CreatureId, so they narrow without loss.
         // Lifetime counters wider than 32 bits saturate.
         bool id_overflow = false;
@@ -595,7 +595,7 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         if (version >= 14) {
             creature.packed_fruit = reader.get<std::uint8_t>();
         }
-        if (version >= 17) {
+        if (version >= 18) {
             creature.genes.body_size = reader.get<std::uint8_t>();
             creature.genes.pigment = reader.get<std::uint8_t>();
             creature.genes.pattern = reader.get<std::uint8_t>();

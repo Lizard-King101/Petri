@@ -56,12 +56,13 @@ Version 13 stores faction markers and the cross-faction hunting setting.
 Version 14 stores staggered environment updates, rooted fruiting shrubs,
 ripe fruit, carried fruit, and the fruit consumption counter.
 Version 15 also stores the climate seed and regional rainfall state.
-Version 16 holds 320 creature slots instead of 160 and stores IDs and
-lifetime counters at their 32-bit widths, which keeps the 128×64 checkpoint
-at 92,938 bytes, inside a 96 KiB QSPI slot. Versions 1–15 load into the
-first 160 slots, and the rest of the pool starts empty. Version 17 adds the
-morphology settings and four morphology genes per slot (94,220 bytes at
-128×64). Version 16 files resume with morphology off.
+Version 16 is reserved for storm fronts, developed on another branch, and
+this build does not load it. Version 17 holds 320 creature slots instead of
+160 and stores IDs and lifetime counters at their 32-bit widths, which keeps
+the 128×64 checkpoint at 92,938 bytes, inside a 96 KiB QSPI slot. Versions
+1–15 load into the first 160 slots, and the rest of the pool starts empty.
+Version 18 adds the morphology settings and four morphology genes per slot
+(94,220 bytes at 128×64). Version 17 files resume with morphology off.
 Checkpoint size depends on world dimensions.
 The file ends with a 64-bit FNV-1a
 checksum. Load validates the checksum and state, rebuilds occupancy and
@@ -102,7 +103,7 @@ persistence milestone.
   and lifetime counters are 32 bits.
   If all 2³²−1 IDs are used, further births count as capacity blocks.
 - Fingerprints and `PTR4` observations keep their earlier 64-bit fields.
-  Checkpoints did until version 16. Loading rejects IDs above 2³²−1 and
+  Checkpoints did until version 17. Loading rejects IDs above 2³²−1 and
   detritus above 65,535.
 
 ### Environment early-outs
@@ -136,7 +137,7 @@ except the fingerprint matched the 160-slot build, and none of those runs
 reached 160 creatures. The fingerprint changes because it hashes every slot.
 All 68 version-15 checkpoints from those runs loaded and resumed for 3,000
 ticks with the same results as the 160-slot build. `tests/` builds a
-version-15 checkpoint from a version-16 one and checks that it resumes
+version-15 checkpoint from a version-17 one and checks that it resumes
 exactly.
 
 | 128×64 build | 160 slots | 320 slots |

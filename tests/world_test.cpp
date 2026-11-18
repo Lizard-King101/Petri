@@ -697,7 +697,7 @@ void checkpoint_replay() {
 }
 
 void older_checkpoints_load() {
-    // Version 16 lacks morphology. Version 15 also has 160 slots and 64-bit
+    // Version 17 lacks morphology. Version 15 also has 160 slots and 64-bit
     // fields, and loads into the first 160 slots. Both resume exactly.
     const auto config = petri::Config{80, true, 1, 0, true, true, false, false, true, true, true, true,
                                       true, false, {42, 1}, true, {2, 14, true}, false, true, false, true};
@@ -707,14 +707,14 @@ void older_checkpoints_load() {
     }
     petri::Checkpoint current{};
     original.save_checkpoint(current);
-    const auto version16 = petri::compat::to_version16(current);
-    check(version16 != nullptr, "The test world used morphology");
-    const auto version15 = petri::compat::to_version15(*version16);
+    const auto version17 = petri::compat::to_version17(current);
+    check(version17 != nullptr, "The test world used morphology");
+    const auto version15 = petri::compat::to_version15(*version17);
     check(version15 != nullptr, "The test world used a slot past version 15's 160");
-    petri::World from16(1), from15(1);
-    check(from16.load_checkpoint(*version16), "A version 16 checkpoint was rejected");
+    petri::World from17(1), from15(1);
+    check(from17.load_checkpoint(*version17), "A version 17 checkpoint was rejected");
     check(from15.load_checkpoint(*version15), "A version 15 checkpoint was rejected");
-    for (const auto* restored : {&from16, &from15}) {
+    for (const auto* restored : {&from17, &from15}) {
         check(restored->fingerprint() == original.fingerprint(), "An older checkpoint restored a different world");
         petri::Checkpoint again{};
         restored->save_checkpoint(again);
@@ -722,16 +722,16 @@ void older_checkpoints_load() {
     }
     for (int tick = 0; tick < 500; ++tick) {
         original.step();
-        from16.step();
+        from17.step();
         from15.step();
     }
-    check(from16.fingerprint() == original.fingerprint() && from15.fingerprint() == original.fingerprint(),
+    check(from17.fingerprint() == original.fingerprint() && from15.fingerprint() == original.fingerprint(),
           "A run resumed from an older checkpoint diverged");
 
     auto damaged = *version15;
-    damaged[5] = 16;
+    damaged[5] = 17;
     petri::compat::seal(damaged);
-    check(!from15.load_checkpoint(damaged), "A version 15 layout was accepted as version 16");
+    check(!from15.load_checkpoint(damaged), "A version 15 layout was accepted as version 17");
 }
 
 petri::Config morphology_config(bool neutral) {
@@ -793,7 +793,7 @@ void morphology_genes() {
     // Expressed genes are saved, restored, and resumed exactly.
     petri::Checkpoint bytes{};
     treated.save_checkpoint(bytes);
-    check(!petri::compat::to_version16(bytes), "A morphology checkpoint converted to version 16");
+    check(!petri::compat::to_version17(bytes), "A morphology checkpoint converted to version 17");
     petri::World restored(1);
     check(restored.load_checkpoint(bytes) && restored.fingerprint() == treated.fingerprint(),
           "A morphology checkpoint did not restore");

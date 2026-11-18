@@ -18,7 +18,8 @@ inline constexpr int height = 32;
 inline constexpr bool wide_world = false;
 #endif
 inline constexpr int capacity = 320;
-// Checkpoint versions 1-15 stored 160 creature slots.
+// Checkpoint versions 1-16 stored 160 creature slots. Version 16 is reserved for
+// storm fronts, which are developed on another branch; this build cannot load it.
 inline constexpr int legacy_capacity = 160;
 inline constexpr int founder_count = 32;
 inline constexpr int faction_count = 4;
@@ -46,10 +47,10 @@ using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * 
 using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + legacy_capacity * 97 + 8>;
 using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
 using WeatherCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + legacy_capacity * 98 + 8>;
-// Version 16: 320 slots with 32-bit IDs and lifetime counters.
+// Version 17: 320 slots with 32-bit IDs and lifetime counters.
 using CapacityCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 +
                                                     capacity * 59 + 8>;
-// Version 17 adds the morphology settings and four morphology genes per slot.
+// Version 18 adds the morphology settings and four morphology genes per slot.
 inline constexpr std::size_t checkpoint_creature_bytes = 63;
 using Checkpoint = std::array<std::uint8_t, 6 + 153 + climate_nodes + 15 * 8 + width * height * 9 +
                                             capacity * checkpoint_creature_bytes + 8>;
