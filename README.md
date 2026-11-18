@@ -99,8 +99,11 @@ Across 180 matched runs covering both world sizes and every ecology flag,
 final fingerprints, CLI output, and saved checkpoints matched the previous
 layout byte for byte. Native speed fell about 12% for the seed 14 wide world
 with fruiting shrubs and regional weather (30,400 to 26,800 ticks/s) and about
-1% for the 64×32 food web. The firmware's static RAM should fall by the same
-36,344 bytes. This has not been measured on the board.
+1% for the 64×32 food web. The observatory firmware (`--observatory`) now
+uses 104,216 bytes of static RAM: 448 initialized and 103,768 zero-filled.
+That is 36,344 bytes less than the previous build. On the board, births,
+deaths, and population at ticks 265 and 275 matched the native build.
+Runtime RAM headroom and tick rates above 1× have not been measured yet.
 
 ## Two-parent reproduction experiment
 
@@ -785,6 +788,35 @@ compiled binary. A follow-up USB capture at 8× recorded 4,800 ticks in
 with no observed reset or telemetry gap, a peak sampled population of 97,
 and zero blocked births. The operator reported that the streaking was gone
 after flashing this build.
+
+### ESP32 passthrough UF2
+
+`build/petri-esp32-passthrough.uf2` bridges the SAMD51's USB serial port
+to the ESP32 UART for esptool. At boot, and each time a host opens the port,
+it restarts the ESP32 into its ROM bootloader, and the NeoPixel turns yellow.
+Tap UP to restart the ESP32 normally (green) and watch its boot log. Tap DOWN
+to return it to the bootloader. Connect at 115200 baud.
+
+```sh
+arduino-cli compile --fqbn adafruit:samd:adafruit_matrixportal_m4:usbstack=tinyusb \
+  --output-dir build/esp32-passthrough firmware/esp32_passthrough
+python3 /path/to/uf2conv.py -c -b 0x4000 -f SAMD51 \
+  -o build/petri-esp32-passthrough.uf2 build/esp32-passthrough/esp32_passthrough.ino.bin
+esptool --port /dev/ttyACM0 --baud 115200 --before no-reset --after no-reset flash-id
+```
+
+The board's ESP32 is an ESP32-D0WD-V3 with 4 MB of flash, running Adafruit
+nina-fw 1.2.2. A verified full image and its restore steps are kept in the
+private `backups/` directory. See [the dual-processor plan](docs/DUAL_PROCESSOR.md).
+
+On Linux, the board's serial port is reassigned each time the board
+re-enumerates. To give the logged-in user access to Adafruit devices,
+including after each re-enumeration, install a udev rule once:
+
+```sh
+echo 'SUBSYSTEMS=="usb", ATTRS{idVendor}=="239a", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/70-adafruit-uaccess.rules
+sudo udevadm control --reload && sudo udevadm trigger
+```
 
 ### Panel and button test
 

@@ -1,7 +1,8 @@
 # Petri dual-processor architecture
 
-**Status:** Design decision, November 18, 2026. Nothing below is implemented yet.
-Values marked *verify* are unconfirmed on this board.
+**Status:** Design decision, November 18, 2026. Stages 1 and 2 are done;
+the rest is not implemented yet. Values marked *verify* are unconfirmed on
+this board.
 
 Petri moves its authoritative world from the SAMD51 to the MatrixPortal M4's
 onboard ESP32. The SAMD51 becomes the board's display, input, storage, and USB
@@ -14,16 +15,31 @@ SAMD51-only firmware stays buildable as a fallback.
 
 | | SAMD51J19 | ESP32 coprocessor |
 | --- | --- | --- |
+| Chip | ATSAMD51J19A | ESP32-D0WD-V3, revision v3.0, 40 MHz crystal (read with esptool) |
 | CPU | 1× Cortex-M4F, 120 MHz, DSP MAC instructions | 2× Xtensa LX6, up to 240 MHz |
 | RAM | 192 KiB | 520 KiB on chip; roughly 250 KiB usable with Wi-Fi, fragmented across regions (*verify*) |
-| Flash | 512 KiB internal + 2 MiB QSPI | Module flash, likely 4 MiB (*verify*) |
-| PSRAM | None | None expected on a WROOM-32-class module (*verify*) |
+| Flash | 512 KiB internal + 2 MiB QSPI | 4 MiB, 3.3 V (read with esptool) |
+| PSRAM | None | The D0WD-V3 has none built in. esptool cannot detect external PSRAM, which WROOM modules lack |
+| Shipped firmware | UF2 bootloader 3.16.0 | Adafruit nina-fw 1.2.2, backed up privately in `backups/` |
 | Other | USB, HUB75 matrix, UP/DOWN buttons, LIS3DH at I2C 0x19, NeoPixel | Wi-Fi, Bluetooth |
 
-Board links between the chips: SPI with `ESP_CS` (D33), `ESP_BUSY` (D31),
-`ESP_RESET` (D30). The UART and GPIO0 lines that Adafruit's passthrough
-firmware uses are also wired. The ESP32 has no USB port of its own, so every
-ESP32 flash goes through the SAMD51.
+Board links between the chips, from the Adafruit SAMD 1.7.17 variant:
+
+| Signal | SAMD51 pin | Variant name |
+| --- | --- | --- |
+| SPI SCK, MISO, MOSI | 34, 35, 36 | `SPIWIFI` (`SPI`) |
+| SPI chip select | 33 | `SPIWIFI_SS` |
+| Busy/ready handshake | 31 | `SPIWIFI_ACK` |
+| ESP32 reset | 30 | `ESP32_RESETN` |
+| ESP32 GPIO0 (boot mode) | 29 | `ESP32_GPIO0` |
+| ESP32 UART RX, TX | 27, 28 | `SerialESP32` (`Serial2`) |
+
+The ESP32 has no USB port of its own, so every ESP32 flash goes through the
+SAMD51. `firmware/esp32_passthrough` bridges USB to `SerialESP32`. It restarts
+the ESP32 into its ROM bootloader at boot and each time a host opens the port.
+Through this bridge, esptool connected only with `--baud 115200`. A 4 MiB read
+then took 372 seconds. One read that started from an already-running flasher
+stub at 115200 switched to 460800 and took 96 seconds.
 
 The ESP32 does not add usable RAM to the SAMD51. The two chips have separate
 memories, and a single world cannot be split across them efficiently.
@@ -124,12 +140,12 @@ and it never receives frames.
 
 Each stage ends with something measured on hardware or checked by a test.
 
-1. **Baseline.** Commit the current tree. Reinstall `arduino-cli` with the
-   Adafruit SAMD core, and install `esptool` and ESP-IDF 5.x.
-2. **ESP32 backup.** Flash Adafruit's passthrough UF2 to the SAMD51; this step
-   can be reversed. Record `chip_id` and `flash_id`, read the full ESP32
-   flash into `backups/`, and store its SHA-256. Restoring means writing that
-   image back at offset 0. Reflash Petri afterward.
+1. **Baseline.** *Done.* The tree is committed. Installed tools are
+   arduino-cli 1.5.1, Adafruit SAMD 1.7.17, Protomatter 1.7.1, TinyUSB 3.7.7,
+   esptool 5.6.0, and Microsoft's `uf2conv.py`. ESP-IDF is still to install.
+2. **ESP32 backup.** *Done.* Two full 4 MiB reads were byte-identical. The
+   image, checksum, and restore steps are in the ignored `backups/` directory.
+   The restore procedure has not been run. Petri firmware is back on the board.
 3. **Passthrough in Petri firmware.** Holding a button at boot bridges USB to
    the ESP32 UART and drives GPIO0 and RESET. This removes the UF2 swap from
    every ESP32 flash.
