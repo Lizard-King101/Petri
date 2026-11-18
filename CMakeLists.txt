@@ -22,6 +22,9 @@ target_compile_features(petri_link PUBLIC cxx_std_17)
 add_executable(petri apps/main.cpp)
 target_link_libraries(petri PRIVATE petri_core)
 
+add_executable(petri_snapshot apps/snapshot.cpp)
+target_link_libraries(petri_snapshot PRIVATE petri_render)
+
 find_package(Threads REQUIRED)
 add_executable(petri_observer apps/observe.cpp)
 target_link_libraries(petri_observer PRIVATE petri_render Threads::Threads)

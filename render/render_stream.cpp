@@ -12,6 +12,7 @@ constexpr std::size_t event_bytes = 2 + 2 * 8;
 constexpr std::size_t cell_bytes = 3;
 constexpr std::size_t cell_count = width * height;
 constexpr std::size_t end_record = record_header + 2 + 4;
+constexpr std::size_t climate_bytes = 2 + climate_nodes + storm_slots * storm_bytes;
 
 struct Writer {
     std::array<std::uint8_t, payload_bytes> buffer{};
@@ -193,6 +194,29 @@ EncodeStats Encoder::encode(const World& world, const EventLog& events, std::siz
     }
     w.finish();
 
+    // The climate is small, so every update carries it.
+    out.reserve(climate_bytes);
+    w.begin(Record::climate);
+    w.put8((world.weather_active() ? 1 : 0) | (world.storm_fronts() ? 2 : 0));
+    w.put8(static_cast<std::uint8_t>(world.weather_active() ? world.seasonal_bias() : 0));
+    for (const auto rain : world.rainfall()) {
+        w.put8(static_cast<std::uint8_t>(rain));
+    }
+    for (const auto& storm : world.storms()) {
+        w.put32(static_cast<std::uint32_t>(storm.x));
+        w.put32(static_cast<std::uint32_t>(storm.y));
+        w.put16(static_cast<std::uint16_t>(storm.vx));
+        w.put16(static_cast<std::uint16_t>(storm.vy));
+        w.put8(storm.radius);
+        w.put8(storm.strength);
+    }
+    w.finish();
+    shadow_.climate.active = world.weather_active();
+    shadow_.climate.storm_fronts = world.storm_fronts();
+    shadow_.climate.seasonal = static_cast<std::int8_t>(world.weather_active() ? world.seasonal_bias() : 0);
+    shadow_.climate.rainfall = world.rainfall();
+    shadow_.climate.storms = world.storms();
+
     // Events in order, as many records as needed.
     const auto* next_event = events.begin();
     while (next_event != events.end()) {
@@ -362,6 +386,26 @@ bool Decoder::apply(const std::uint8_t* payload, std::size_t size, RenderState& 
             }
             break;
         }
+        case Record::climate:
+            valid = length == climate_bytes;
+            if (valid) {
+                const auto flags = body.get8();
+                mirror.climate.active = flags & 1;
+                mirror.climate.storm_fronts = flags & 2;
+                mirror.climate.seasonal = static_cast<std::int8_t>(body.get8());
+                for (auto& rain : mirror.climate.rainfall) {
+                    rain = static_cast<std::int8_t>(body.get8());
+                }
+                for (auto& storm : mirror.climate.storms) {
+                    storm.x = static_cast<std::int32_t>(body.get32());
+                    storm.y = static_cast<std::int32_t>(body.get32());
+                    storm.vx = static_cast<std::int16_t>(body.get16());
+                    storm.vy = static_cast<std::int16_t>(body.get16());
+                    storm.radius = static_cast<std::uint8_t>(body.get8());
+                    storm.strength = static_cast<std::uint8_t>(body.get8());
+                }
+            }
+            break;
         case Record::end:
             valid = length == 6;
             if (valid) {

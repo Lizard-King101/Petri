@@ -12,6 +12,8 @@
 //              The list is complete: slots not listed are empty.
 //   events     count (u8), then per event: kind (u8), flag (u8), two actors of id (u32), cell (u16), look (u16)
 //   cells      first cell (u16), then 3 bytes per consecutive cell
+//   climate    flags (u8: bit 0 active, bit 1 storm fronts), seasonal (i8), one i8 per
+//              rainfall node, then per storm slot: x, y (i32), vx, vy (i16), radius, strength (u8)
 //   end        update number (u16), FNV-1a of all render cells the encoder believes were sent (u32)
 //
 // The encoder keeps a shadow of the mirror it has sent. Cells that differ from
@@ -29,7 +31,7 @@ namespace petri::stream {
 inline constexpr std::size_t payload_bytes = 4096;
 inline constexpr std::size_t refresh_cells = 128;
 
-enum class Record : std::uint8_t { update = 1, creatures = 2, events = 3, cells = 4, end = 5 };
+enum class Record : std::uint8_t { update = 1, creatures = 2, events = 3, cells = 4, end = 5, climate = 6 };
 
 struct EncodeStats {
     std::size_t payloads = 0, bytes = 0, cells_sent = 0, cells_pending = 0, events_sent = 0;

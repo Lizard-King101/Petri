@@ -41,9 +41,36 @@ RenderCreature render_creature(const Creature& creature) {
     return {creature.id, creature.cell, look_of(creature.genes)};
 }
 
+int rain_at(const RenderClimate& climate, std::size_t cell) {
+    const int bias = climate_bias(climate, cell);
+    if (!climate.storm_fronts) {
+        return bias;
+    }
+    return bias > 0 ? bias * storm_cover_at(climate.storms, cell) / storm_unit : 0;
+}
+
+int climate_bias(const RenderClimate& climate, std::size_t cell) {
+    if (!climate.active) {
+        return 0;
+    }
+    const int x = static_cast<int>(cell % width), y = static_cast<int>(cell / width);
+    const int col = x / climate_spacing, row = y / climate_spacing;
+    const int dx = x % climate_spacing, dy = y % climate_spacing;
+    const int node = row * climate_columns + col;
+    const auto& r = climate.rainfall;
+    const int north = r[node] * (climate_spacing - dx) + r[node + 1] * dx;
+    const int south = r[node + climate_columns] * (climate_spacing - dx) + r[node + climate_columns + 1] * dx;
+    return (north * (climate_spacing - dy) + south * dy) / (climate_spacing * climate_spacing) + climate.seasonal;
+}
+
 void capture(const World& world, RenderState& state) {
     state.tick = world.metrics().ticks;
     state.connected_biomes = world.connected_biomes();
+    state.climate.active = world.weather_active();
+    state.climate.seasonal = static_cast<std::int8_t>(world.weather_active() ? world.seasonal_bias() : 0);
+    state.climate.rainfall = world.rainfall();
+    state.climate.storm_fronts = world.storm_fronts();
+    state.climate.storms = world.storms();
     for (std::size_t index = 0; index < state.cells.size(); ++index) {
         state.cells[index] = render_cell(world, index);
     }

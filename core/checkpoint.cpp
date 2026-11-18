@@ -9,7 +9,7 @@
 namespace petri {
 namespace {
 
-constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 15};
+constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 16};
 
 // Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
@@ -123,6 +123,18 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
     writer.put(climate_seed_);
     for (const auto rain : rainfall_) {
         writer.put(rain);
+    }
+    writer.put(std::uint8_t(storm_fronts_));
+    for (const auto& storm : storms_) {
+        writer.put(storm.x);
+        writer.put(storm.y);
+        writer.put(storm.vx);
+        writer.put(storm.vy);
+        writer.put(storm.radius);
+        writer.put(storm.strength);
+    }
+    for (const auto store : soil_water_) {
+        writer.put(store);
     }
     writer.put(metrics_.ticks);
     writer.put(metrics_.births);
@@ -246,6 +258,10 @@ bool World::load_checkpoint(const FloraCheckpoint& checkpoint) {
     return decode_checkpoint(checkpoint.data(), checkpoint.size(), 14);
 }
 
+bool World::load_checkpoint(const ClimateCheckpoint& checkpoint) {
+    return decode_checkpoint(checkpoint.data(), checkpoint.size(), 15);
+}
+
 bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version) {
     // Stage the decoded state so a rejected checkpoint leaves the running world intact.
     World decoded;
@@ -257,13 +273,19 @@ bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::u
 }
 
 bool World::load_checkpoint_in_place(const std::uint8_t* data, std::size_t size) {
-    if (size != std::tuple_size<Checkpoint>::value) {
+    // The current version, or version 15, which resumes with steady rainfall.
+    std::uint8_t version = 0;
+    if (size == std::tuple_size<Checkpoint>::value) {
+        version = header.back();
+    } else if (size == std::tuple_size<ClimateCheckpoint>::value) {
+        version = 15;
+    } else {
         return false;
     }
     // Start from the same defaults a staged decode uses, without a temporary World.
     this->~World();
     new (this) World();
-    return decode_into(*this, data, size, header.back());
+    return decode_into(*this, data, size, version);
 }
 
 bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t size, std::uint8_t version) {
@@ -399,6 +421,35 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         for (auto& rain : decoded.rainfall_) {
             rain = reader.get<std::int8_t>();
             if (rain < -rainfall_limit || rain > rainfall_limit || (!dynamic && rain)) {
+                return false;
+            }
+        }
+    }
+    if (version >= 16) {
+        const auto storms = reader.get<std::uint8_t>();
+        if (storms > 1 || (storms && !decoded.dynamic_environment_)) {
+            return false;
+        }
+        decoded.storm_fronts_ = storms != 0;
+        constexpr std::int32_t far = 64 * 256;
+        for (auto& storm : decoded.storms_) {
+            storm.x = reader.get<std::int32_t>();
+            storm.y = reader.get<std::int32_t>();
+            storm.vx = reader.get<std::int16_t>();
+            storm.vy = reader.get<std::int16_t>();
+            storm.radius = reader.get<std::uint8_t>();
+            storm.strength = reader.get<std::uint8_t>();
+            const bool empty = !storm.x && !storm.y && !storm.vx && !storm.vy && !storm.radius && !storm.strength;
+            if (storm.active() ? !storms || storm.radius > 32 || storm.strength > 32 || storm.x < -far ||
+                                     storm.x > width * 256 + far || storm.y < -far || storm.y > height * 256 + far
+                               : !empty) {
+                return false;
+            }
+        }
+        for (auto& store : decoded.soil_water_) {
+            store = reader.get<std::int32_t>();
+            // Recharge peaks below 7,000 bias units (1/256 each), so 2^24 bounds any real store.
+            if (store < 0 || store > (1 << 24) || (!storms && store)) {
                 return false;
             }
         }

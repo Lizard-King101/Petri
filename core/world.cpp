@@ -193,6 +193,11 @@ constexpr int shrub_min_foliage = 4;
 constexpr unsigned weather_duration = 4096;
 constexpr unsigned season_duration = 32768;
 constexpr unsigned environment_warmup = 1024;
+constexpr std::uint32_t storm_salt = 0x3c6ef372u, wind_salt = 0xa54ff53au;
+// Storms recharge a soil-water store at each climate node, in proportion to the
+// node's positive bias times cover / storm_unit. The store drains with a time
+// constant of soil_drain ticks, so its long-run mean tracks the steady bias.
+constexpr int soil_drain = 1024;
 
 bool shrub_habitat(const Cell& cell) {
     return cell.moisture >= 56 && cell.moisture <= 192;
@@ -250,6 +255,7 @@ World::World(std::uint32_t seed, Config config)
       staggered_growth_(config.staggered_growth || config.fruiting_plants || (connected_biomes_ && config.dynamic_environment)),
       fruiting_plants_(config.fruiting_plants),
       dynamic_environment_(connected_biomes_ && config.dynamic_environment),
+      storm_fronts_(dynamic_environment_ && config.storm_fronts),
       climate_seed_(dynamic_environment_ ? seed : 0) {
     occupants_.fill(-1);
     for (int index = 0; index < width * height; ++index) {
@@ -499,7 +505,7 @@ void World::update_moisture(int index) {
     const int retained = std::min(18, cell.plants * 2);
     const int pressure = (occupants_[index] >= 0 ? 9 : 0) + 3 * occupied_neighbors(index);
     const bool weather_active = dynamic_environment_ && metrics_.ticks >= environment_warmup;
-    const int rainfall = weather_active ? weather_bias(index) : 0;
+    const int rainfall = weather_active ? rainfall_at(index) : 0;
     const int supply = water_supply(index, irregular_terrain_);
     const int spring = weather_active && supply >= 144 ? 128 : 0;
     const int target = std::clamp(supply + rainfall + retained - pressure, spring, 255);
@@ -524,6 +530,119 @@ void World::update_climate() {
     const auto epoch = static_cast<std::uint32_t>((metrics_.ticks - environment_warmup) / weather_duration);
     const int target = int(trait_roll(climate_seed_, index, epoch ^ 0x53b5d731u) % (2 * rainfall_limit + 1)) - rainfall_limit;
     rainfall_[index] += std::clamp(target - rainfall_[index], -2, 2);
+    if (storm_fronts_) {
+        update_storms();
+        update_soil_water();
+    }
+}
+
+void World::update_storms() {
+    constexpr std::int32_t unit = 256;
+    for (auto& storm : storms_) {
+        if (!storm.active()) {
+            continue;
+        }
+        storm.x += storm.vx;
+        storm.y += storm.vy;
+        const std::int32_t margin = (storm.radius + 2) * unit;
+        if (storm.x < -margin || storm.x > width * unit + margin || storm.y < -margin || storm.y > height * unit + margin) {
+            storm = {};
+        }
+    }
+    const auto free = std::find_if(storms_.begin(), storms_.end(), [](const Storm& storm) { return !storm.active(); });
+    if (free == storms_.end()) {
+        return;
+    }
+    // The wet season breeds storms about thirteen times as often as the dry one.
+    const auto tick = static_cast<std::uint32_t>(metrics_.ticks);
+    const auto roll = trait_roll(climate_seed_, tick, storm_salt);
+    const int wetness = std::clamp(seasonal_bias() + 16, 0, 32);
+    if (roll % 4096 >= static_cast<unsigned>(8 + 3 * wetness)) {
+        return;
+    }
+    // One prevailing wind per weather epoch, from one of eight directions.
+    static constexpr std::int8_t directions[8][2] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+    const auto epoch = static_cast<std::uint32_t>((metrics_.ticks - environment_warmup) / weather_duration);
+    const auto wind = trait_roll(climate_seed_, epoch, wind_salt);
+    const auto& direction = directions[wind % 8];
+    const auto shape = trait_roll(climate_seed_, tick, storm_salt ^ wind_salt);
+    // 0.19 to 0.43 cells a tick; diagonal winds keep about the same speed.
+    const int speed = 48 + static_cast<int>((wind >> 8) % 64) + static_cast<int>(shape % 9) - 4;
+    const int diagonal = direction[0] && direction[1] ? 181 : 256;
+    Storm storm;
+    storm.vx = static_cast<std::int16_t>(direction[0] * speed * diagonal / 256);
+    storm.vy = static_cast<std::int16_t>(direction[1] * speed * diagonal / 256);
+    storm.radius = static_cast<std::uint8_t>(8 + (shape >> 8) % 14);
+    storm.strength = static_cast<std::uint8_t>(6 + (shape >> 16) % 6);
+    // Start just off the upwind edge, at a random point along it.
+    const std::int32_t edge = storm.radius * unit;
+    const auto along = shape >> 20;
+    if (std::abs(storm.vx) >= std::abs(storm.vy)) {
+        storm.x = storm.vx > 0 ? -edge : width * unit + edge;
+        storm.y = static_cast<std::int32_t>(along % (height * unit));
+    } else {
+        storm.y = storm.vy > 0 ? -edge : height * unit + edge;
+        storm.x = static_cast<std::int32_t>(along % (width * unit));
+    }
+    *free = storm;
+}
+
+void World::update_soil_water() {
+    // Each node's store is in 1/256 bias units.
+    const int seasonal = seasonal_bias();
+    for (int node = 0; node < climate_nodes; ++node) {
+        const int col = node % climate_columns, row = node / climate_columns;
+        const int x = std::min(col * climate_spacing, width - 1), y = std::min(row * climate_spacing, height - 1);
+        const int bias = rainfall_[node] + seasonal;
+        const std::int32_t recharge = bias > 0 ? bias * storm_cover(std::size_t(y) * width + x) / storm_unit : 0;
+        auto& store = soil_water_[node];
+        store += (recharge * 256 - store) / soil_drain;
+    }
+}
+
+int World::storm_cover(std::size_t cell) const {
+    return storm_cover_at(storms_, cell);
+}
+
+int storm_cover_at(const std::array<Storm, storm_slots>& storms, std::size_t cell) {
+    // Distances in 1/16 cell keep the squares within 32 bits.
+    const std::int32_t cx = static_cast<std::int32_t>(cell % width) * 16 + 8;
+    const std::int32_t cy = static_cast<std::int32_t>(cell / width) * 16 + 8;
+    int cover = 0;
+    for (const auto& storm : storms) {
+        if (!storm.active()) {
+            continue;
+        }
+        const std::int32_t dx = cx - storm.x / 16, dy = cy - storm.y / 16;
+        const std::int32_t reach = storm.radius * 16;
+        const std::int32_t distance = dx * dx + dy * dy, limit = reach * reach;
+        if (distance < limit) {
+            cover += static_cast<int>((limit - distance) * 256 / limit) * storm.strength;
+        }
+    }
+    return cover;
+}
+
+int World::rainfall_at(std::size_t cell) const {
+    const int bias = weather_bias(static_cast<int>(cell));
+    if (!storm_fronts_ || bias <= 0) {
+        return bias;
+    }
+    // Wet ground reads the soil water the storms left, blended like the bias.
+    const int x = static_cast<int>(cell % width), y = static_cast<int>(cell / width);
+    const int col = x / climate_spacing, row = y / climate_spacing;
+    const int dx = x % climate_spacing, dy = y % climate_spacing;
+    const int node = row * climate_columns + col;
+    const auto& w = soil_water_;
+    const std::int64_t north = std::int64_t(w[node]) * (climate_spacing - dx) + std::int64_t(w[node + 1]) * dx;
+    const std::int64_t south = std::int64_t(w[node + climate_columns]) * (climate_spacing - dx) +
+                               std::int64_t(w[node + climate_columns + 1]) * dx;
+    return static_cast<int>((north * (climate_spacing - dy) + south * dy) / (climate_spacing * climate_spacing * 256));
+}
+
+int World::storm_rain_at(std::size_t cell) const {
+    const int bias = weather_at(cell);
+    return storm_fronts_ && bias > 0 ? bias * storm_cover(cell) / storm_unit : 0;
 }
 
 int World::weather_bias(int index) const {
@@ -535,10 +654,17 @@ int World::weather_bias(int index) const {
     const int south = rainfall_[node + climate_columns] * (climate_spacing - dx) +
         rainfall_[node + climate_columns + 1] * dx;
     const int regional = (north * (climate_spacing - dy) + south * dy) / (climate_spacing * climate_spacing);
+    return regional + seasonal_bias();
+}
+
+int World::seasonal_bias() const {
     const auto phase = static_cast<unsigned>((metrics_.ticks - environment_warmup + season_duration / 4) % season_duration);
     const int ramp = phase < season_duration / 2 ? phase : season_duration - phase;
-    const int seasonal = ramp * 32 / (season_duration / 2) - 16;
-    return regional + seasonal;
+    return ramp * 32 / (season_duration / 2) - 16;
+}
+
+bool World::weather_active() const {
+    return dynamic_environment_ && metrics_.ticks >= environment_warmup;
 }
 
 int World::occupied_neighbors(int cell) const {
@@ -1292,6 +1418,15 @@ std::uint64_t World::fingerprint() const {
         add(climate_seed_);
         for (const auto rain : rainfall_) {
             add(rain);
+        }
+    }
+    if (storm_fronts_) {
+        add(std::uint8_t(storm_fronts_));
+        for (const auto& storm : storms_) {
+            add(storm.x), add(storm.y), add(storm.vx), add(storm.vy), add(storm.radius), add(storm.strength);
+        }
+        for (const auto store : soil_water_) {
+            add(store);
         }
     }
     return hash;

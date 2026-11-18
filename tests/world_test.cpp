@@ -713,7 +713,8 @@ void detritus_limit() {
     }
     petri::Checkpoint saved{};
     original.save_checkpoint(saved);
-    constexpr std::size_t cells = 6 + 151 + petri::climate_nodes + 15 * 8;
+    constexpr std::size_t cells = 6 + 151 + petri::climate_nodes + 1 + petri::storm_slots * petri::storm_bytes +
+                                    petri::climate_nodes * 4 + 15 * 8;
     constexpr std::size_t stride = 9, nutrients = 1, detritus = 3;
     const auto get = [](const petri::Checkpoint& bytes, std::size_t at) {
         return bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | std::uint32_t(bytes[at + 3]) << 24;

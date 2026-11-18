@@ -23,6 +23,25 @@ constexpr std::uint16_t dim(std::uint16_t color) {
     return (color & 0xf7de) >> 1;
 }
 
+constexpr std::uint32_t mix(std::uint32_t a, std::uint32_t b) {
+    std::uint32_t value = a * 0x9e3779b1u ^ (b + 0x7f4a7c15u) * 0x85ebca6bu;
+    value ^= value >> 15;
+    value *= 0x2c1b3c6du;
+    return value ^ (value >> 12);
+}
+
+// Blends `color` toward `toward` by alpha / 256, per RGB565 channel.
+constexpr std::uint16_t blend(std::uint16_t color, std::uint16_t toward, unsigned alpha) {
+    const unsigned r = color >> 11, g = (color >> 5) & 63, b = color & 31;
+    const unsigned tr = toward >> 11, tg = (toward >> 5) & 63, tb = toward & 31;
+    const auto lerp = [alpha](unsigned from, unsigned to) { return (from * (256 - alpha) + to * alpha) >> 8; };
+    return static_cast<std::uint16_t>(lerp(r, tr) << 11 | lerp(g, tg) << 5 | lerp(b, tb));
+}
+
+constexpr auto rain_color = rgb565(220, 235, 255);
+// Rain becomes visible above this bias. The world's rainfall nodes span +-80 and the season +-16.
+constexpr int rain_threshold = 8;
+
 constexpr std::uint32_t terrain_pattern(unsigned cell) {
     auto value = (cell + 0x9e3779b9u) * 0x85ebca6bu;
     value = (value ^ (value >> 13)) * 0xc2b2ae35u;
@@ -687,12 +706,186 @@ std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
     return color;
 }
 
-void Panel::draw_environment(int tile) {
-    if (tile >= 4) {
+void Panel::draw_terrain_rect(int x0, int y0, int x1, int y1, int tile) {
+    x0 = std::max(0, x0);
+    y0 = std::max(0, y0);
+    x1 = std::min(panel_width, x1);
+    y1 = std::min(panel_height, y1);
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            terrain_.pixels[y * panel_width + x] = ground_pixel(x + camera_.left, y + camera_.top, tile);
+        }
+    }
+    if (x1 > x0 && y1 > y0) {
+        terrain_pixels_drawn_ += static_cast<std::uint32_t>((x1 - x0) * (y1 - y0));
+    }
+}
+
+void Panel::update_terrain(int tile) {
+    auto& cache = terrain_;
+    const int dx = int(camera_.left) - cache.left, dy = int(camera_.top) - cache.top;
+    const bool full = !terrain_cache_enabled_ || !cache.valid || cache.tile != tile ||
+                      cache.connected != state_.connected_biomes || std::abs(dx) >= panel_width ||
+                      std::abs(dy) >= panel_height;
+    if (full) {
+        draw_terrain_rect(0, 0, panel_width, panel_height, tile);
+        cache.seen.fill({});
+    } else if (dx || dy) {
+        // Shift what is still on screen, then draw the strips the pan exposed.
+        Frame shifted{};
         for (int y = 0; y < panel_height; ++y) {
             for (int x = 0; x < panel_width; ++x) {
-                frame_[y * panel_width + x] = ground_pixel(x + camera_.left, y + camera_.top, tile);
+                const int sx = x + dx, sy = y + dy;
+                if (sx >= 0 && sx < panel_width && sy >= 0 && sy < panel_height) {
+                    shifted[y * panel_width + x] = cache.pixels[sy * panel_width + sx];
+                }
             }
+        }
+        cache.pixels = shifted;
+        if (dx > 0) {
+            draw_terrain_rect(panel_width - dx, 0, panel_width, panel_height, tile);
+        } else if (dx < 0) {
+            draw_terrain_rect(0, 0, -dx, panel_height, tile);
+        }
+        if (dy > 0) {
+            draw_terrain_rect(0, panel_height - dy, panel_width, panel_height, tile);
+        } else if (dy < 0) {
+            draw_terrain_rect(0, 0, panel_width, -dy, tile);
+        }
+    }
+    cache.left = camera_.left;
+    cache.top = camera_.top;
+    cache.tile = tile;
+    cache.connected = state_.connected_biomes;
+    cache.valid = true;
+
+    // A pixel reads the cells at its dual-grid corners, so a cell affects
+    // pixels from half a tile before its origin to half a tile past its end.
+    const int first_x = std::max(0, int(camera_.left) / tile - 1);
+    const int last_x = std::min(width - 1, (int(camera_.left) + panel_width - 1) / tile + 1);
+    const int first_y = std::max(0, int(camera_.top) / tile - 1);
+    const int last_y = std::min(height - 1, (int(camera_.top) + panel_height - 1) / tile + 1);
+    for (int cy = first_y; cy <= last_y; ++cy) {
+        for (int cx = first_x; cx <= last_x; ++cx) {
+            const int index = cy * width + cx;
+            auto& entry = cache.seen[(cy % TerrainCache::rows) * TerrainCache::columns + cx % TerrainCache::columns];
+            const auto& cell = state_.cells[index];
+            if (entry.index == index && entry.cell == cell) {
+                continue;
+            }
+            // A cell first seen after a full draw is already correct; only changes redraw.
+            if (entry.index == index || !full) {
+                const int px = cx * tile - camera_.left, py = cy * tile - camera_.top;
+                draw_terrain_rect(px - tile / 2, py - tile / 2, px + tile + tile / 2, py + tile + tile / 2, tile);
+            }
+            entry.index = static_cast<std::uint16_t>(index);
+            entry.cell = cell;
+        }
+    }
+}
+
+int Panel::pixel_cell(int x, int y, int tile) const {
+    if (camera_.zoom == 0) {
+        constexpr int scale = width / panel_width;
+        return (y * scale) * width + x * scale;
+    }
+    const int wx = std::clamp(x + camera_.left, 0, width * tile - 1);
+    const int wy = std::clamp(y + camera_.top, 0, height * tile - 1);
+    return (wy / tile) * width + wx / tile;
+}
+
+void Panel::grade_and_shimmer(int tile) {
+    // The season tints the ground: warmer in the dry half, cooler in the wet half.
+    const int season = state_.climate.active ? state_.climate.seasonal : 0;
+    const auto toward = season < 0 ? rgb565(255, 180, 60) : rgb565(60, 150, 255);
+    const unsigned grade = static_cast<unsigned>(std::abs(season)) * 3;
+    if (grade) {
+        for (auto& color : frame_) {
+            color = blend(color, toward, grade);
+        }
+    }
+    // Open water carries reflections. Each 9x6 patch of world pixels holds one
+    // short horizontal glint that fades in, sways one pixel either way, and fades
+    // out on its own cycle. Wetland is a real biome, so only it reflects.
+    constexpr int patch_w = 9, patch_h = 6;
+    constexpr auto glint_color = rgb565(190, 228, 250);
+    for (int y = 0; y < panel_height; ++y) {
+        const int wy = y + camera_.top;
+        for (int x = 0; x < panel_width; ++x) {
+            if (state_.cells[pixel_cell(x, y, tile)].biome() != Biome::wetland) {
+                continue;
+            }
+            const int wx = x + camera_.left;
+            const auto seed = mix(static_cast<std::uint32_t>(wx / patch_w), static_cast<std::uint32_t>(wy / patch_h));
+            const int row = static_cast<int>((seed >> 4) % patch_h);
+            if (wy % patch_h != row) {
+                continue;
+            }
+            const std::uint32_t cycle = 1400 + (seed >> 20) % 900;
+            const std::uint32_t age = (now_ms_ + seed) % cycle;
+            // Visible for the first 30% of the cycle, brightest in the middle.
+            const std::uint32_t shown = cycle * 3 / 10;
+            if (age >= shown) {
+                continue;
+            }
+            static constexpr int sway[] = {0, 1, 1, 0, -1, -1};
+            const int start = static_cast<int>((seed >> 8) % (patch_w - 2)) +
+                              sway[(age / 110 + (seed >> 28)) % 6];
+            const int length = 2 + static_cast<int>((seed >> 12) & 1);
+            const int column = wx % patch_w - start;
+            if (column < 0 || column >= length) {
+                continue;
+            }
+            const std::uint32_t rise = age < shown / 2 ? age : shown - age;
+            const unsigned alpha = 30 + static_cast<unsigned>(rise * 110 / (shown / 2)) - (column == length - 1 ? 25 : 0);
+            auto& color = frame_[y * panel_width + x];
+            color = blend(color, glint_color, std::min(140u, alpha));
+        }
+    }
+}
+
+void Panel::draw_weather(int tile) {
+    if (!state_.climate.active) {
+        return;
+    }
+    // Drops fall along diagonal lanes in world pixels, one pixel right for every
+    // two down, so a streak's three pixels share a lane. Each lane has its own
+    // phase, so drops are staggered rather than falling in rows. Lanes are tied to
+    // the world, so rain stays put as the camera pans.
+    const bool overview = camera_.zoom == 0;
+    const int period = overview ? 24 : 14;
+    const int fall = static_cast<int>(now_ms_ / (overview ? 40 : 18));
+    for (int y = 0; y < panel_height; ++y) {
+        const int wy = y + (overview ? 0 : camera_.top);
+        for (int x = 0; x < panel_width; ++x) {
+            const int rain = rain_at(state_.climate, pixel_cell(x, y, tile)) - rain_threshold;
+            if (rain <= 0) {
+                continue;
+            }
+            const int wx = x + (overview ? 0 : camera_.left);
+            const int lane = wx - wy / 2;
+            const auto lane_seed = mix(static_cast<std::uint32_t>(lane), 0x51ed27u);
+            const int along = wy - fall + static_cast<int>(lane_seed % static_cast<unsigned>(period));
+            const int offset = ((along % period) + period) % period;
+            if (offset > 2) {
+                continue;
+            }
+            const int drop = (along - offset) / period;
+            const auto chance = mix(lane_seed, static_cast<std::uint32_t>(drop)) & 255;
+            if (chance < static_cast<unsigned>(std::min(120, rain))) {
+                auto& color = frame_[y * panel_width + x];
+                color = blend(color, rain_color, offset == 2 ? 230 : offset == 1 ? 130 : 60);
+            }
+        }
+    }
+}
+
+void Panel::draw_environment(int tile) {
+    if (tile >= 4) {
+        update_terrain(tile);
+        frame_ = terrain_.pixels;
+        if (weather_enabled_) {
+            grade_and_shimmer(tile);
         }
     }
     const int last_y = (camera_.top + panel_height - 1) / tile;
@@ -792,6 +985,10 @@ void Panel::draw_grid(bool show_creatures, int tile, std::uint32_t elapsed) {
         draw_environment(tile);
     }
     if (!show_creatures) {
+        // The habitat view shows where it is raining.
+        if (weather_enabled_ && rain_enabled_) {
+            draw_weather(tile);
+        }
         return;
     }
     const auto& creatures = state_.creatures;
@@ -877,6 +1074,9 @@ void Panel::draw_close(int tile, std::uint32_t elapsed) {
         }
     }
     draw_contact(tile);
+    if (weather_enabled_ && rain_enabled_) {
+        draw_weather(tile);
+    }
 }
 
 void Panel::draw(std::uint32_t now_ms, std::uint32_t now_us, unsigned speed_index) {

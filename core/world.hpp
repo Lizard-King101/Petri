@@ -26,6 +26,7 @@ inline constexpr int climate_columns = width / climate_spacing + 1;
 inline constexpr int climate_rows = height / climate_spacing + 1;
 inline constexpr int climate_nodes = climate_columns * climate_rows;
 inline constexpr int rainfall_limit = 80;
+inline constexpr int storm_slots = 4;
 
 // Header, metadata, cells, creature slots, and a checksum.
 using LegacyCheckpoint = std::array<std::uint8_t, 6 + 37 + width * height * 4 + capacity * 34 + 8>;
@@ -42,9 +43,31 @@ using KinAvoidanceCheckpoint = std::array<std::uint8_t, 6 + 131 + 15 * 8 + width
 using KinTuningCheckpoint = std::array<std::uint8_t, 6 + 134 + 15 * 8 + width * height * 8 + capacity * 96 + 8>;
 using FactionCheckpoint = std::array<std::uint8_t, 6 + 136 + 15 * 8 + width * height * 8 + capacity * 97 + 8>;
 using FloraCheckpoint = std::array<std::uint8_t, 6 + 146 + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
-using Checkpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
+using ClimateCheckpoint = std::array<std::uint8_t, 6 + 151 + climate_nodes + 15 * 8 + width * height * 9 + capacity * 98 + 8>;
+// Version 16 adds the storm-front flag, the storms, and the soil water at each climate node.
+inline constexpr std::size_t storm_bytes = 4 + 4 + 2 + 2 + 1 + 1;
+using Checkpoint = std::array<std::uint8_t, std::tuple_size<ClimateCheckpoint>::value + 1 + storm_slots * storm_bytes +
+                                               climate_nodes * 4>;
 
 enum class Biome : std::uint8_t { scrub, grassland, wetland };
+
+// A storm front crossing the map. It rains only where the regional climate is
+// wet, so wet regions get their water in passing storms with dry spells between.
+struct Storm {
+    std::int32_t x = 0, y = 0;   // Center, in 1/256 cell.
+    std::int16_t vx = 0, vy = 0; // Motion per tick, in 1/256 cell.
+    std::uint8_t radius = 0;     // Cells. 0 means the slot is empty.
+    std::uint8_t strength = 0;   // Rain gain at the center.
+
+    bool active() const { return radius != 0; }
+};
+
+// Storm rain at a cell is its positive bias times cover / storm_unit. The value
+// is calibrated so storms deliver the steady model's water on average: across
+// eight seeds the mean ratio was 1.01 (0.68 to 1.41).
+inline constexpr int storm_unit = 155;
+// Summed coverage of a cell: falloff (0-256) times strength, for each storm over it.
+int storm_cover_at(const std::array<Storm, storm_slots>& storms, std::size_t cell);
 
 constexpr Biome biome_at(unsigned moisture) {
     return moisture >= 128 ? Biome::wetland : moisture >= 56 ? Biome::grassland : Biome::scrub;
@@ -269,6 +292,8 @@ struct Config {
     bool staggered_growth = false;
     bool fruiting_plants = false;
     bool dynamic_environment = false;
+    // Requires dynamic_environment. Positive regional rainfall arrives in storms.
+    bool storm_fronts = false;
 };
 
 class World {
@@ -300,6 +325,24 @@ public:
     bool dynamic_environment() const { return dynamic_environment_; }
     bool fruiting_shrub(std::size_t cell) const { return shrubs_[cell] != 0; }
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
+    // Climate, read-only for observers such as the renderer.
+    const std::array<std::int8_t, climate_nodes>& rainfall() const { return rainfall_; }
+    bool weather_active() const;
+    // The seasonal part of the weather bias.
+    int seasonal_bias() const;
+    // Regional rainfall plus season at a cell; 0 while the weather is inactive.
+    int weather_at(std::size_t cell) const { return weather_active() ? weather_bias(static_cast<int>(cell)) : 0; }
+    bool storm_fronts() const { return storm_fronts_; }
+    const std::array<Storm, storm_slots>& storms() const { return storms_; }
+    // Summed storm coverage at a cell: falloff (0-256) times strength.
+    int storm_cover(std::size_t cell) const;
+    // The water the weather adds to a cell's moisture target. Drought (a negative
+    // bias) dries steadily. With storm fronts, wet ground reads the soil water that
+    // passing storms recharge, instead of the steady bias.
+    int rainfall_at(std::size_t cell) const;
+    // Rain falling on a cell right now; what the renderer draws.
+    int storm_rain_at(std::size_t cell) const;
+    const std::array<std::int32_t, climate_nodes>& soil_water() const { return soil_water_; }
     std::uint64_t fingerprint() const;
     void save_checkpoint(Checkpoint& checkpoint) const;
     // Streams the same bytes in chunks of up to 256 bytes. Returns the total size.
@@ -324,6 +367,7 @@ public:
     bool load_checkpoint(const KinTuningCheckpoint& checkpoint);
     bool load_checkpoint(const FactionCheckpoint& checkpoint);
     bool load_checkpoint(const FloraCheckpoint& checkpoint);
+    bool load_checkpoint(const ClimateCheckpoint& checkpoint);
 
 private:
     World() = default;
@@ -339,6 +383,8 @@ private:
     void transport_nutrients();
     void update_moisture(int index);
     void update_climate();
+    void update_storms();
+    void update_soil_water();
     int weather_bias(int index) const;
     int occupied_neighbors(int cell) const;
     void update_creature(int slot, StepObserver observer);
@@ -380,6 +426,8 @@ private:
     // Zero is bare of shrubs. Other values store one plus the ripe fruit count.
     ShrubGrid shrubs_{};
     std::array<std::int8_t, climate_nodes> rainfall_{};
+    std::array<Storm, storm_slots> storms_{};
+    std::array<std::int32_t, climate_nodes> soil_water_{};
     std::array<Creature, capacity> creatures_{};
     OccupancyGrid occupants_{};
     std::array<std::int16_t, capacity> dependents_{};
@@ -405,6 +453,7 @@ private:
     bool staggered_growth_ = false;
     bool fruiting_plants_ = false;
     bool dynamic_environment_ = false;
+    bool storm_fronts_ = false;
     std::uint32_t climate_seed_ = 0;
 };
 

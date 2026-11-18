@@ -91,6 +91,10 @@ bool read_checkpoint(const char* path, petri::World& world) {
         petri::FloraCheckpoint data;
         return read(data);
     }
+    if (length == petri::ClimateCheckpoint{}.size()) {
+        petri::ClimateCheckpoint data;
+        return read(data);
+    }
     petri::Checkpoint data;
     return length == data.size() && read(data);
 }
@@ -299,7 +303,7 @@ void usage(std::ostream& out) {
            "[--provisioning] [--adaptive-hunts] [--passive-prey] [--kin-avoidance] [--kin-strength 0-20] "
            "[--resemblance-strength 0-20] [--protect-similar-prey] [--hunt-threshold 0-160] [--chase-cost 0-160] "
            "[--faction-markers] [--cross-faction-hunts] [--staggered-growth] [--fruiting-plants] "
-           "[--dynamic-environment] [--neutral] | petri --load PATH\n"
+           "[--dynamic-environment] [--storms] [--neutral] | petri --load PATH\n"
         << "For either form: [--ticks UINT64] [--until-births UINT64] [--save PATH] [--lineage-every TICKS] [--hunt-every TICKS] [--benchmark]\n";
 }
 
@@ -324,6 +328,7 @@ int main(int argc, char** argv) {
     bool faction_markers = false, cross_faction_hunts = false;
     bool staggered_growth = false, fruiting_plants = false;
     bool dynamic_environment = false;
+    bool storm_fronts = false;
     bool hunt_tuning_supplied = false, kin_tuning_supplied = false;
     bool protect_similar_prey = false;
     unsigned hunt_threshold = petri::HuntTuning::default_threshold;
@@ -407,6 +412,10 @@ int main(int argc, char** argv) {
         }
         if (option == "--dynamic-environment") {
             dynamic_environment = custom_start = true;
+            continue;
+        }
+        if (option == "--storms") {
+            storm_fronts = custom_start = true;
             continue;
         }
         if (i + 1 < argc) {
@@ -504,6 +513,10 @@ int main(int argc, char** argv) {
         std::cerr << "--dynamic-environment requires --connected-biomes.\n";
         return 2;
     }
+    if (storm_fronts && !dynamic_environment) {
+        std::cerr << "--storms requires --dynamic-environment.\n";
+        return 2;
+    }
 
     petri::World world(seed, {static_cast<std::uint8_t>(nutrients), !neutral,
                              static_cast<std::uint8_t>(carcass_decay), static_cast<std::uint8_t>(initial_carrion),
@@ -512,7 +525,7 @@ int main(int argc, char** argv) {
                              {static_cast<std::uint8_t>(hunt_threshold), static_cast<std::uint8_t>(chase_cost)}, kin_avoidance,
                              {static_cast<std::uint8_t>(kin_strength), static_cast<std::uint8_t>(resemblance_strength),
                               protect_similar_prey}, faction_markers, cross_faction_hunts, staggered_growth, fruiting_plants,
-                              dynamic_environment});
+                              dynamic_environment, storm_fronts});
     if (load_path && !read_checkpoint(load_path, world)) {
         std::cerr << "Could not read a valid checkpoint from " << load_path << '\n';
         return 1;
@@ -573,6 +586,11 @@ int main(int argc, char** argv) {
     }
     if (world.dynamic_environment()) {
         std::cout << " dynamic_environment=1";
+    }
+    if (world.storm_fronts()) {
+        const auto active = std::count_if(world.storms().begin(), world.storms().end(),
+                                          [](const petri::Storm& storm) { return storm.active(); });
+        std::cout << " storm_fronts=1 storms_active=" << active;
     }
     if (world.fruiting_plants()) {
         unsigned shrubs = 0, fruit_biomass = 0;

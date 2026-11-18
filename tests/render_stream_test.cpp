@@ -29,7 +29,7 @@ void collect(void* context, const std::uint8_t* data, std::size_t size) {
 
 bool same_state(const RenderState& a, const RenderState& b) {
     return a.tick == b.tick && a.connected_biomes == b.connected_biomes && a.cells == b.cells &&
-           a.creatures == b.creatures;
+           a.creatures == b.creatures && a.climate == b.climate;
 }
 
 Config stream_config() {
@@ -248,9 +248,107 @@ void observation_from_mirror_matches() {
           "The mirror observation differs from the World observation");
 }
 
+// Sends one step's events to two observers.
+struct ObserverPair {
+    StepObserver a, b;
+
+    StepObserver observer() {
+        StepObserver both;
+        both.context = this;
+        both.record_hunt = [](void* c, std::uint16_t h, std::uint16_t p) {
+            auto& x = *static_cast<ObserverPair*>(c);
+            x.a.record_hunt(x.a.context, h, p);
+            x.b.record_hunt(x.b.context, h, p);
+        };
+        both.record_meal = [](void* c, const Creature& creature, bool meat) {
+            auto& x = *static_cast<ObserverPair*>(c);
+            x.a.record_meal(x.a.context, creature, meat);
+            x.b.record_meal(x.b.context, creature, meat);
+        };
+        both.record_attack = [](void* c, const Creature& attacker, const Creature& target, bool landed) {
+            auto& x = *static_cast<ObserverPair*>(c);
+            x.a.record_attack(x.a.context, attacker, target, landed);
+            x.b.record_attack(x.b.context, attacker, target, landed);
+        };
+        both.record_death = [](void* c, const Creature& creature, DeathCause cause) {
+            auto& x = *static_cast<ObserverPair*>(c);
+            x.a.record_death(x.a.context, creature, cause);
+            x.b.record_death(x.b.context, creature, cause);
+        };
+        return both;
+    }
+};
+
+void climate_matches_world() {
+    // The renderer's rain equals the world's weather bias at every cell.
+    auto world = std::make_unique<World>(14, stream_config());
+    auto state = std::make_unique<RenderState>();
+    std::size_t raining = 0, samples = 0;
+    for (int tick = 0; tick < 12000; ++tick) {
+        world->step();
+        if (tick % 500 == 499) {
+            capture(*world, *state);
+            for (std::size_t cell = 0; cell < state->cells.size(); ++cell) {
+                check(climate_bias(state->climate, cell) == world->weather_at(cell),
+                      "Rendered climate differs from the world's");
+                const int expected = world->storm_fronts() ? world->storm_rain_at(cell) : world->weather_at(cell);
+                check(rain_at(state->climate, cell) == expected, "Rendered rain differs from the world's");
+                raining += rain_at(state->climate, cell) > 0;
+                ++samples;
+            }
+        }
+    }
+    if constexpr (wide_world) {
+        check(state->climate.active && state->climate.storm_fronts, "The observatory world has no storm fronts");
+        check(raining > 0 && raining < samples, "Storms never rained, or rained everywhere");
+    }
+}
+
+void terrain_cache_exact() {
+    // The cached terrain draws the same frames as drawing every pixel.
+    auto world = std::make_unique<World>(14, stream_config());
+    for (int tick = 0; tick < 500; ++tick) {
+        world->step();
+    }
+    auto cached = std::make_unique<LocalPanel>(*world);
+    auto direct = std::make_unique<LocalPanel>(*world);
+    direct->set_terrain_cache(false);
+    std::uint32_t now_ms = 1000;
+    std::size_t frames = 0;
+    for (int tick = 0; tick < 1200; ++tick) {
+        if (tick % 150 == 149) {
+            cached->cycle_view(now_ms);
+            direct->cycle_view(now_ms);
+        }
+        if (tick % 300 == 37) {
+            // Zoom 3 (4-pixel cells) is only reachable from the companion.
+            const Camera camera{PanelView::close, 3, 40, 20, world->creatures()[tick % 40].id};
+            cached->set_camera(camera, now_ms);
+            direct->set_camera(camera, now_ms);
+        }
+        ObserverPair pair{cached->before_step(now_ms), direct->before_step(now_ms)};
+        world->step(pair.observer());
+        cached->after_step(now_ms * 1000, 250000);
+        direct->after_step(now_ms * 1000, 250000);
+        for (int frame = 0; frame < 4; ++frame) {
+            now_ms += 33;
+            cached->draw(now_ms, now_ms * 1000, 2);
+            direct->draw(now_ms, now_ms * 1000, 2);
+            check(cached->frame() == direct->frame(), "A cached terrain frame differs from a full draw");
+            ++frames;
+        }
+    }
+    const auto saved = 100.0 * (1.0 - double(cached->panel().terrain_pixels_drawn()) /
+                                          std::max<std::uint32_t>(1, direct->panel().terrain_pixels_drawn()));
+    std::printf("STREAM terrain_cache frames=%zu terrain_pixels cached=%u full=%u saved=%.1f%%\n", frames,
+                cached->panel().terrain_pixels_drawn(), direct->panel().terrain_pixels_drawn(), saved);
+}
+
 } // namespace
 
 int main() {
+    climate_matches_world();
+    terrain_cache_exact();
     observation_from_mirror_matches();
     lossless_round_trip();
     panel_frames_match();

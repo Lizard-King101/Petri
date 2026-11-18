@@ -13,6 +13,7 @@
 
 #include "world.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -77,9 +78,34 @@ struct RenderCreature {
 
 RenderCreature render_creature(const Creature& creature);
 
+// The world's climate: coarse rainfall nodes and the season. The renderer draws
+// rain and season from it, so what the panel shows is the weather the biology feels.
+struct RenderClimate {
+    bool active = false, storm_fronts = false;
+    std::int8_t seasonal = 0;
+    std::array<std::int8_t, climate_nodes> rainfall{};
+    std::array<Storm, storm_slots> storms{};
+
+    friend bool operator==(const RenderClimate& a, const RenderClimate& b) {
+        const auto same_storm = [](const Storm& x, const Storm& y) {
+            return x.x == y.x && x.y == y.y && x.vx == y.vx && x.vy == y.vy && x.radius == y.radius &&
+                   x.strength == y.strength;
+        };
+        return a.active == b.active && a.storm_fronts == b.storm_fronts && a.seasonal == b.seasonal &&
+               a.rainfall == b.rainfall && std::equal(a.storms.begin(), a.storms.end(), b.storms.begin(), same_storm);
+    }
+};
+
+// Regional rainfall plus season at a cell, as World::weather_at computes it.
+int climate_bias(const RenderClimate& climate, std::size_t cell);
+// Rain falling on a cell now: storm rain with storm fronts (World::storm_rain_at),
+// otherwise the positive climate bias.
+int rain_at(const RenderClimate& climate, std::size_t cell);
+
 struct RenderState {
     std::uint64_t tick = 0;
     bool connected_biomes = false;
+    RenderClimate climate{};
     std::array<RenderCell, width * height> cells{};
     std::array<RenderCreature, capacity> creatures{};
 };

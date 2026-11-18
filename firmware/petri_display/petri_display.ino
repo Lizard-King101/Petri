@@ -7,7 +7,7 @@
 //
 // Buttons: tap UP to change view, tap DOWN to change speed (1, 2, 4, 8 ticks/s),
 // hold DOWN to pause or resume. Over USB, '>' and '|' act like a DOWN tap and hold,
-// 'S' saves a checkpoint now, 'C' toggles back-to-back saves, and 'X' corrupts
+// 'W' shows or hides rain, 'S' saves a checkpoint now, 'C' toggles back-to-back saves, and 'X' corrupts
 // the newest slot. 'C' and 'X' are test hooks for power-cut and recovery tests.
 //
 // The world is saved to QSPI every 10 minutes (firmware/checkpoint_store.hpp).
@@ -17,6 +17,7 @@
 #include <Adafruit_Protomatter.h>
 #include <Adafruit_TinyUSB.h>
 #include <cstdio>
+#include <cstring>
 #include <unistd.h>
 
 #include "src/checkpoint_store.hpp"
@@ -29,7 +30,15 @@
 
 namespace {
 
-constexpr uint32_t frameMicros = 50000;
+// Measured with firmware/gfxbench: depth 5 refreshes at 233 Hz and pushes a
+// frame in 4.3 ms, the same cost as depth 4 with twice the levels per channel.
+#ifndef PETRI_COLOR_DEPTH
+#define PETRI_COLOR_DEPTH 5
+#endif
+#ifndef PETRI_FRAME_RATE
+#define PETRI_FRAME_RATE 30
+#endif
+constexpr uint32_t frameMicros = 1000000ul / PETRI_FRAME_RATE;
 constexpr uint32_t pollMicros = 2000;
 constexpr uint32_t debounceMs = 25;
 constexpr uint32_t holdMs = 600;
@@ -40,7 +49,7 @@ constexpr uint32_t saveIntervalMs = 10ul * 60 * 1000;
 
 uint8_t rgbPins[] = {7, 8, 9, 10, 11, 12};
 uint8_t addressPins[] = {17, 18, 19, 20};
-Adafruit_Protomatter matrix(petri::panel_width, 4, 1, rgbPins, 4, addressPins, 14, 15, 16, true);
+Adafruit_Protomatter matrix(petri::panel_width, PETRI_COLOR_DEPTH, 1, rgbPins, 4, addressPins, 14, 15, 16, true);
 
 petri::RenderState mirror;
 petri::Panel panel(mirror);
@@ -366,6 +375,10 @@ void serviceObservatory(uint32_t nowMs) {
             speedGesture(byte == '>' ? Gesture::tap : Gesture::hold);
             continue;
         }
+        if (byte == 'W') {
+            panel.set_rain(!panel.rain());
+            continue;
+        }
         if (byte == 'S') {
             saves.wanted = true;
             continue;
@@ -400,7 +413,7 @@ void serviceObservatory(uint32_t nowMs) {
 void drawWorld(uint32_t nowMs) {
     const uint32_t started = micros();
     panel.draw(nowMs, micros(), speedIndex);
-    matrix.drawRGBBitmap(0, 0, panel.frame().data(), petri::panel_width, petri::panel_height);
+    std::memcpy(matrix.getBuffer(), panel.frame().data(), sizeof(petri::Frame));
     matrix.show();
     maxDrawUs = max(maxDrawUs, micros() - started);
     if (observationRequested && observationSize == 0) {

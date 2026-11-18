@@ -1,7 +1,9 @@
 # Petri graphics and evolution plan
 
-**Status:** Plan, November 18, 2026. Follows the dual-processor cutover
-([DUAL_PROCESSOR.md](DUAL_PROCESSOR.md)). Nothing below is implemented yet.
+**Status:** November 18, 2026. Follows the dual-processor cutover
+([DUAL_PROCESSOR.md](DUAL_PROCESSOR.md)). Graphics step 1 and the weather part
+of step 2 are done (see Progress). The simulation track runs in a separate
+session on its own branch.
 
 With the world on the ESP32 and the SAMD51 drawing from a render stream, each
 chip has room for its own job. This plan spends that room on two tracks that
@@ -56,6 +58,91 @@ Everything here is presentation and never feeds back into the biology.
    - The direction comes from the spec's automatic camera section.
 5. **Data views.** Lineage colors and maps of density or traits, as extra
    text-free views.
+
+### Progress
+
+- **Renderer core: done.**
+  - A native profile put 78% of close-view drawing in `Panel::ground_pixel`,
+    the dual-grid terrain.
+  - `Panel` now keeps an exact terrain cache. A pan shifts the cached pixels
+    and draws the exposed strips. A changed cell redraws only the pixels its
+    dual-grid tiles touch, tracked through a 240-entry ring of the cells
+    seen in view.
+  - In `tests/render_stream_test.cpp`, 4,800 cached frames per world size
+    match full draws, while drawing 81.5% fewer terrain pixels in 64×32 and
+    90.2% fewer in 128×64.
+  - The display firmware runs Protomatter depth 5 at 30 fps
+    (`PETRI_COLOR_DEPTH` and `PETRI_FRAME_RATE` override both). It writes
+    frames straight into the canvas.
+  - On the board: a steady 30 fps and 8 updates/s at 8 ticks/s. The worst
+    frame including the push is 9–15 ms, against 19 ms before at 20 fps.
+  - Depth 6 is built but not yet judged on the panel.
+- **Weather from the real climate: done.**
+  - `RenderState` carries a `RenderClimate`: the 45 coarse rainfall nodes,
+    the seasonal bias, and whether the weather is active. A new stream
+    record sends it in every update, about 50 bytes.
+  - `rain_at()` reproduces `World::weather_at()` exactly, which a test
+    checks at every cell.
+  - The panel draws:
+    - rain as streaks on fixed diagonal lanes in world pixels, denser where
+      the cell's rain is higher;
+    - a warm grade in the dry season and a cool one in the wet season;
+    - glints on wetland ground.
+  - Rain also shows in the habitat view.
+  - On the board with weather, the worst frame is 15–19 ms at 30 fps, and
+    the fingerprints still match native.
+- **Storm fronts in the biology** (`--storms`, on in the observatory world).
+  - **What changed.** The weather used to be a slow supply bias that rained
+    somewhere almost all the time: 13–71% of the map was above the rain
+    threshold over a season, and never 0%. Now up to four storms cross the
+    map. Each epoch sets a prevailing wind from one of eight directions.
+    Storms move at 0.19–0.43 cells a tick, have a radius of 8–21 cells, and
+    are born about 13 times as often in the wet season.
+  - **Water.** A storm rains only where the regional climate is wet. Its
+    rain recharges a soil-water store at each of the 45 climate nodes, which
+    drains with a time constant of 1,024 ticks. Wet ground reads that store
+    instead of the steady bias, and drought still dries steadily.
+    `storm_unit` (155) is calibrated so storms deliver the old water: across
+    eight seeds the mean ratio was 1.01 (0.68–1.41).
+  - **Coverage.** The whole map was rain-free 10–26% of the time, and at most
+    16–25% rained at once.
+  - **Ecology,** at tick 50,000 on eight matched seeds, steady rain vs storms:
+
+    | Measure | Steady rain | Storms |
+    | --- | ---: | ---: |
+    | Population | 58 | 52 |
+    | Births | 21,426 | 19,481 |
+    | Scrub / grassland / wetland cells | 4,821 / 2,411 / 959 | 5,280 / 1,734 / 1,179 |
+    | Fruit eaten | 11,006 | 11,048 |
+    | Extinctions | 0 | 0 |
+    | Blocked births (mean) | 111 | 447 (one seed 3,535) |
+
+    Storms polarize the habitat into wetter wetlands and less grassland. The
+    booms after storms hit the 160-creature limit more often.
+  - **Checkpoints and fingerprints.** Checkpoint version 16 stores the flag,
+    the storms, and the soil water. Version 15 resumes with steady rain. With
+    storms off, all 98 baseline outputs are unchanged, and v15 checkpoints
+    resume with identical fingerprints. A storm world's save and resume is
+    byte-identical.
+  - **Rendering.** The renderer receives the storms in the climate record and
+    draws exactly `World::storm_rain_at` (tested at every cell). Rain uses
+    diagonal lanes, one pixel right for every two down, with a phase per lane.
+    On the board, fingerprints matched native at ticks 299, 323, and 374.
+  - **Known issues on the board.** A QSPI save drops the panel to about
+    16 fps for 1.8 s, because sector erases run in the display loop. The
+    `restores` counter counts a restore when it is offered, even if the ESP32
+    rejects it.
+- **Water reflections.** Each 9×6 patch of world pixels holds one short
+  light blue-white horizontal glint. It fades in, sways a pixel either way,
+  and fades out on its own 1.4–2.3 s cycle. `W` over USB, and `--rain 0` in
+  `petri_snapshot`, hide rain so the water can be judged alone.
+- **Day/night: deferred to the biology.** The simulation has no daylight,
+  so lighting tied to time of day would only be decoration. It is a joint
+  item: the simulation track adds daylight that affects growth and
+  activity, then the renderer lights the world from it.
+- **Not done yet:** wind sway and glowing eyes, which wait for daylight.
+- **`apps/snapshot.cpp` (`petri_snapshot`)** renders a PNG contact sheet of
+  every view over a few frames, for reviewing graphics without the board.
 
 ## Simulation track (ESP32)
 

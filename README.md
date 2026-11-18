@@ -56,6 +56,8 @@ Version 13 stores faction markers and the cross-faction hunting setting.
 Version 14 stores staggered environment updates, rooted fruiting shrubs,
 ripe fruit, carried fruit, and the fruit consumption counter.
 Version 15 also stores the climate seed and regional rainfall state.
+Version 16 stores the storm-front flag, up to four storms, and the soil water
+at each climate node. Version-15 files resume with steady rainfall.
 Checkpoint size depends on world dimensions.
 The file ends with a 64-bit FNV-1a
 checksum. Load validates the checksum and state, rebuilds occupancy and
@@ -271,6 +273,13 @@ their current and adjacent cells offer too little food.
 ```
 
 The native observatory and current firmware enable regional weather.
+
+`--storms` (with `--dynamic-environment`) delivers wet weather in storm
+fronts instead of a steady bias. Storms cross the map on the epoch's
+prevailing wind, rain only where the regional climate is wet, and recharge a
+soil-water store that drains over about 1,000 ticks. Between storms the map is
+dry. The observatory world and current firmware enable storms. See the
+[storm results](docs/GRAPHICS_AND_EVOLUTION.md#progress).
 The [long environment comparison](docs/experiments/README.md#regional-weather-and-succession)
 records changes in habitat, shrubs, population, and the conserved material
 budget on matched seeds.
@@ -941,6 +950,22 @@ was interrupted leaves its slot invalid, and the previous slot is used. USB
 commands: `S` saves now. The test hooks are `C`, which toggles back-to-back
 saves, and `X`, which corrupts the newest slot. These checkpoints replace the
 CIRCUITPY drive that was on the QSPI flash. Its files are in `backups/`.
+
+### Graphics review without the board
+
+`petri_snapshot` renders the observatory world into a PNG contact sheet.
+Rows are the close, detail, zoom-3, life, and habitat views, and columns are
+consecutive frames, with each LED drawn as a block.
+
+```sh
+./build-wide/petri_snapshot sheet.png --ticks 3000 --frames 4 --interval-ms 60
+```
+
+The display firmware draws at Protomatter depth 5 and 30 fps. To try other
+values, set `PETRI_EXTRA_FLAGS` when building, for example
+`PETRI_EXTRA_FLAGS=-DPETRI_COLOR_DEPTH=6 firmware/build_petri_uf2.sh ... --display`. Rain,
+the season grade, and wetland glints come from the world's real rainfall
+field and season. See the [graphics plan](docs/GRAPHICS_AND_EVOLUTION.md).
 
 ### SPI link test
 
