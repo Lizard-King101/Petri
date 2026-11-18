@@ -551,105 +551,321 @@ void Panel::update_camera(int tile, std::uint32_t elapsed, unsigned speed_index)
     placed_ = true;
 }
 
+namespace {
+
+// Plants read brighter than the ground beneath them so they hold up on the LEDs.
+struct Greens {
+    std::uint16_t base, mid, tip;
+};
+constexpr Greens grass_greens{rgb565(48, 104, 36), rgb565(76, 148, 50), rgb565(132, 192, 72)};
+constexpr Greens reed_greens{rgb565(34, 92, 58), rgb565(54, 136, 82), rgb565(124, 176, 92)};
+constexpr Greens scrub_greens{rgb565(92, 104, 46), rgb565(120, 136, 60), rgb565(176, 168, 92)};
+constexpr Greens shrub_greens{rgb565(96, 56, 24), rgb565(64, 144, 56), rgb565(112, 176, 72)};
+constexpr auto straw_color = rgb565(180, 150, 70);
+constexpr auto seed_color = rgb565(220, 200, 128);
+constexpr auto cattail_color = rgb565(128, 74, 36);
+constexpr auto pad_color = rgb565(44, 132, 68), pad_light = rgb565(100, 184, 100);
+constexpr auto bloom_color = rgb565(244, 200, 224);
+constexpr auto twig_color = rgb565(104, 70, 38);
+constexpr auto pebble_color = rgb565(88, 82, 76), pebble_light = rgb565(140, 132, 120);
+
+Greens dried(Greens greens, unsigned alpha) {
+    if (!alpha) {
+        return greens;
+    }
+    return {blend(greens.base, straw_color, alpha * 3 / 4), blend(greens.mid, straw_color, alpha),
+            blend(greens.tip, straw_color, alpha)};
+}
+
+// Horizontal offset at `k` pixels above the base of a stalk `height` tall whose
+// tip leans `lean` pixels. The bend grows with the square of the height, so the
+// base holds still and the tip moves most.
+int bend(int lean, int k, int height) {
+    if (!lean || height <= 1) {
+        return 0;
+    }
+    const int span = (height - 1) * (height - 1);
+    const int amount = lean * k * k;
+    return (amount + (amount > 0 ? span / 2 : -span / 2)) / span;
+}
+
+} // namespace
+
+int Panel::plant_lean(int index, std::uint32_t salt) const {
+    // Wind blows the way the storms travel, since every storm rides the epoch's
+    // prevailing wind. Under a storm the plants lean hard and shake; elsewhere a
+    // light breeze sends a gust across the field every few seconds.
+    const int cx = index % width * 16 + 8, cy = index / width * 16 + 8;
+    int dir = 1, cover = 0, strongest = 0;
+    bool any = false;
+    for (const auto& storm : state_.climate.storms) {
+        if (!storm.active()) {
+            continue;
+        }
+        if (!any) {
+            dir = storm.vx < 0 ? -1 : 1;
+            any = true;
+        }
+        const std::int32_t dx = cx - storm.x / 16, dy = cy - storm.y / 16;
+        const std::int32_t reach = storm.radius * 16;
+        const std::int32_t distance = dx * dx + dy * dy, limit = reach * reach;
+        if (distance < limit) {
+            const int here = static_cast<int>((limit - distance) * 256 / limit) * storm.strength;
+            cover += here;
+            if (here > strongest) {
+                strongest = here;
+                dir = storm.vx < 0 ? -1 : 1;
+            }
+        }
+    }
+    // Cells further downwind meet each gust later, so it rolls across the field.
+    const int column = index % width;
+    const std::uint32_t downwind = static_cast<std::uint32_t>(dir > 0 ? width - column : column);
+    const std::uint32_t wave = (now_ms_ + (salt & 127) + downwind * 120) % 3400;
+    if (!cover) {
+        return wave < 700 ? dir : 0;
+    }
+    int lean = cover >= 1536 ? 3 : cover >= 640 ? 2 : 1;
+    if ((now_ms_ + salt % 97 * 7) / 110 % 3 == 0) {
+        lean -= 1;
+    }
+    if (wave < 1100) {
+        lean += 1;
+    }
+    return dir * std::min(3, lean);
+}
+
+void Panel::plant_blade(int x, int y, int height, int slant, int lean, std::uint16_t base, std::uint16_t mid,
+                        std::uint16_t tip) {
+    for (int k = 0; k < height; ++k) {
+        // Blades rise from a narrow base and arch outward toward the tip.
+        const auto color = k == height - 1 ? tip : k * 2 >= height ? mid : base;
+        pixel(x + bend(slant, k, height) + bend(lean, k, height), y - k, color);
+    }
+}
+
 void Panel::plant_sprite(int x, int y, int tile, int index) {
     const auto& cell = state_.cells[index];
-    const auto fruit = cell.fruit();
-    const bool shrub = cell.shrub();
-    struct Colors { std::uint16_t stem, leaf, tip; };
-    constexpr std::array colors{
-        Colors{rgb565(104, 72, 28), rgb565(96, 128, 48), rgb565(152, 160, 72)},
-        Colors{rgb565(40, 88, 40), rgb565(64, 152, 56), rgb565(120, 192, 72)},
-        Colors{rgb565(40, 88, 64), rgb565(56, 144, 104), rgb565(156, 160, 80)},
-    };
-    constexpr Colors shrub_colors{rgb565(96, 56, 24), rgb565(64, 144, 56), rgb565(112, 176, 72)};
+    const auto hash = mix(static_cast<std::uint32_t>(index), 0x2545f491u);
     const auto biome = cell.biome();
-    const auto [stem, leaf, tip] = shrub ? shrub_colors : colors[static_cast<unsigned>(biome)];
-    if (tile == 4) {
-        // The plant sits below the creature and to the right of any carrion.
-        pixel(x + 2, y + 3, fruit ? fruit_color : dim(leaf));
-        if (cell.plants >= 2) {
+    const int plants = cell.plants;
+    const int detritus = static_cast<int>(cell.detritus());
+    const bool detail = tile == 16;
+    // Grass dries to straw toward the scrub edge at moisture 56; above 96 it stays green.
+    const unsigned dryness = biome == Biome::grassland
+        ? static_cast<unsigned>(std::clamp(96 - int(cell.moisture()), 0, 40)) * 4 : 0;
+    const auto greens = dried(biome == Biome::wetland ? reed_greens : biome == Biome::scrub ? scrub_greens : grass_greens,
+                              dryness);
+
+    if (cell.shrub()) {
+        const auto fruit = cell.fruit();
+        const auto [stem, leaf, tip] = shrub_greens;
+        const int shift = static_cast<int>(hash % 3) - 1;
+        if (tile == 4) {
+            pixel(x + 2, y + 3, fruit ? fruit_color : dim(leaf));
             pixel(x + 3, y + 2, dim(tip));
+            return;
         }
-        if (cell.plants >= 7) {
-            pixel(x + 3, y + 3, dim(leaf));
-        }
-        return;
-    }
-    if (tile == 8) {
-        if (shrub) {
-            fill(x + 2, y + 4, 1, 3, stem);
-            fill(x + 1, y + 2, 4, 3, leaf);
-            fill(x + 2, y + 1, 2, 1, tip);
+        const int sway = plant_lean(index, hash) / 2;
+        if (tile == 8) {
+            const int sx = x + std::clamp(shift, 0, 1);
+            fill(sx + 2, y + 4, 1, 3, stem);
+            fill(sx + 1, y + 2, 4, 3, leaf);
+            fill(sx + 2 + sway, y + 1, 2, 1, tip);
             if (fruit) {
-                pixel(x + 1, y + 2, fruit_color);
+                pixel(sx + 1, y + 2, fruit_color);
             }
             if (fruit >= 3) {
-                pixel(x + 3, y + 1, fruit_color);
+                pixel(sx + 3 + sway, y + 1, fruit_color);
             }
             return;
         }
-        const int top = biome == Biome::wetland ? 3 : 4;
-        fill(x + 2, y + top, 1, 7 - top, leaf);
-        pixel(x + 2, y + top, tip);
-        pixel(x + 1, y + 5, leaf);
-        if (cell.plants >= 5) {
-            pixel(x + 3, y + 4, leaf);
+        const int growth = std::min(4, std::max(0, (plants - 1) / 2));
+        const int sx = x + 2 * shift;
+        const int top = y + 9 - growth;
+        fill(sx + 4, top + 2, 2, y + 13 - top, stem);
+        fill(sx + 2, top + 1, 8, 3, leaf);
+        fill(sx + 3 + sway, top, 6, 2, tip);
+        fill(sx + 1, top + 3, 7, 2, leaf);
+        constexpr std::array<std::array<int, 2>, max_fruit> berries{{{2, 2}, {5, 0}, {8, 2}, {4, 3}}};
+        for (int i = 0; i < fruit; ++i) {
+            pixel(sx + berries[i][0] + (berries[i][1] < 2 ? sway : 0), top + berries[i][1], fruit_color);
         }
         return;
     }
 
-    const int growth = std::min(4, (cell.plants - 1) / 2);
-    if (shrub) {
-        const int top = y + 9 - growth;
-        fill(x + 4, top + 2, 2, y + 13 - top, stem);
-        fill(x + 2, top + 1, 8, 3, leaf);
-        fill(x + 3, top, 6, 2, tip);
-        fill(x + 1, top + 3, 7, 2, leaf);
-        constexpr std::array<std::array<int, 2>, max_fruit> berries{{{2, 2}, {5, 0}, {8, 2}, {4, 3}}};
-        for (int i = 0; i < fruit; ++i) {
-            pixel(x + berries[i][0], top + berries[i][1], fruit_color);
+    if (tile == 4) {
+        // Plants keep to the corner the creature and carrion leave free: the bottom
+        // row right of the carrion and the right-hand column.
+        if (biome == Biome::scrub && detritus >= 6 && (hash & 3) == 0) {
+            pixel(x + 3, y + 1 + static_cast<int>((hash >> 2) % 3), dim(twig_color));
+        }
+        if (!plants) {
+            return;
+        }
+        // The free ring, clockwise from below the creature: (2,3) (3,3) (3,2) (3,1) (3,0) (2,0) (1,0) (0,0).
+        static constexpr std::array<std::array<int, 2>, 8> ring{{{2, 3}, {3, 3}, {3, 2}, {3, 1}, {3, 0}, {2, 0}, {1, 0}, {0, 0}}};
+        if (biome == Biome::wetland) {
+            // A reed stands in the right-hand column, or the left one above the carrion.
+            const int column = (hash >> 1) % 3 ? 3 : 0;
+            const int stalk = std::min(3, 1 + plants / 3);
+            const int foot = column == 3 ? 3 : 2;
+            for (int k = 0; k < stalk; ++k) {
+                pixel(x + column, y + foot - k, k == stalk - 1 ? greens.tip : greens.mid);
+            }
+            return;
+        }
+        const int start = static_cast<int>((hash >> 1) % 4);
+        pixel(x + ring[start][0], y + ring[start][1], plants >= 4 ? greens.mid : dim(greens.mid));
+        if (plants >= 3) {
+            const auto& next = ring[start + 1];
+            pixel(x + next[0], y + next[1], biome == Biome::grassland && plants >= 7 ? seed_color : greens.tip);
+        }
+        if (plants >= 7) {
+            const auto& far = ring[start + 3];
+            pixel(x + far[0], y + far[1], greens.mid);
         }
         return;
     }
-    switch (biome) {
-    case Biome::scrub: {
-        const int top = y + 11 - growth;
-        fill(x + 5, top + 1, 2, y + 14 - top, stem);
-        fill(x + 3, top + 1, 6, 2, leaf);
-        fill(x + 4, top, 4, 1, tip);
-        if (growth >= 2) {
-            fill(x + 1, top + 3, 6, 2, leaf);
-            fill(x + 2, top + 2, 3, 1, tip);
-        }
-        break;
-    }
-    case Biome::grassland: {
-        const int length = 4 + growth;
-        fill(x + 4, y + 14, 6, 1, stem);
-        for (int i = 0; i < length; ++i) {
-            const auto blade = i == length - 1 ? tip : leaf;
-            pixel(x + 6 - i / 2, y + 14 - i, blade);
-            pixel(x + 7 + i / 3, y + 14 - i, blade);
-            if (i < length - 2) {
-                pixel(x + 4 - i / 3, y + 14 - i, leaf);
+
+    // Scrub keeps the litter of what grew and died there: twigs and pebbles.
+    if (biome == Biome::scrub) {
+        const int pieces = detail ? std::min(3, (detritus + 4) / 6) : std::min(2, (detritus + 5) / 8);
+        for (int i = 0; i < pieces; ++i) {
+            const auto bit = mix(hash, 100u + unsigned(i));
+            const int lx = x + 1 + static_cast<int>(bit % unsigned(tile - 3));
+            const int ly = y + 2 + static_cast<int>((bit >> 5) % unsigned(tile - 3));
+            const bool twig = (bit >> 10) % 3 != 0;
+            if (twig) {
+                const int dir = (bit >> 12) & 1 ? 1 : -1;
+                pixel(lx, ly, twig_color);
+                pixel(lx + 1, ly - (dir > 0 ? 1 : 0), twig_color);
+                if (detail) {
+                    pixel(lx + 2, ly - (dir > 0 ? 1 : 0), dim(twig_color));
+                    pixel(lx + 1, ly + (dir > 0 ? 0 : -1), dim(twig_color));
+                }
+            } else {
+                pixel(lx, ly, pebble_light);
+                if (detail) {
+                    pixel(lx + 1, ly, pebble_color);
+                }
             }
         }
-        break;
     }
-    case Biome::wetland: {
-        const int top = 9 - growth;
-        fill(x + 4, y + top + 2, 1, 13 - top, stem);
-        fill(x + 7, y + top, 1, 15 - top, leaf);
-        fill(x + 7, y + top - 1, 1, 2, tip);
-        pixel(x + 4, y + top + 1, tip);
-        if (growth >= 2) {
-            fill(x + 9, y + top + 3, 1, 12 - top, stem);
-            pixel(x + 9, y + top + 2, tip);
+    if (!plants) {
+        return;
+    }
+
+    const int growth = std::min(4, (plants - 1) / 2);
+    const int slots = detail ? 3 : 2;
+    const int tufts = detail ? 1 + (plants >= 3) + (plants >= 6) : 1 + (plants >= 4);
+    const int rotate = static_cast<int>(hash % unsigned(slots));
+    for (int t = 0; t < tufts; ++t) {
+        const auto bits = mix(hash, unsigned(t));
+        const int slot = (rotate + t) % slots;
+        // Bases spread over the lower part of the cell so tufts never form rows.
+        const int bx = x + (detail ? 2 + slot * 4 + static_cast<int>(bits % 4) : 1 + slot * 3 + static_cast<int>(bits % 3));
+        const int by = y + (detail ? 7 + static_cast<int>((bits >> 3) % 9) : 3 + static_cast<int>((bits >> 3) % 5));
+        const int size = std::max(0, growth - t);
+        const int lean = std::clamp(plant_lean(index, bits), detail ? -3 : -2, detail ? 3 : 2);
+        switch (biome) {
+        case Biome::grassland: {
+            // A tussock of blades fanning from one base, with seed heads when lush.
+            static constexpr std::array<std::array<int, 5>, 3> fans{{{-2, 0, 2, 0, 0}, {-3, -1, 1, 2, 0}, {-3, -1, 0, 1, 3}}};
+            // At zoom 4 a tuft is one upright blade, with a shorter one arching out to each side once it fills in.
+            static constexpr std::array<std::array<int, 3>, 2> small_fans{{{0, 0, 0}, {0, -1, 1}}};
+            const int blades = detail ? 3 + (size >= 2) + (size >= 4) : plants >= 2 ? 3 : 1;
+            const int tall = detail ? 4 + size + static_cast<int>((bits >> 14) & 1) : 3 + size / 2 + static_cast<int>((bits >> 14) & 1);
+            int tallest = 0, tallest_slant = 0;
+            for (int i = 0; i < blades; ++i) {
+                const int slant = detail ? fans[blades - 3][i] : small_fans[blades == 3][i];
+                const int height = detail ? std::max(2, tall - (std::abs(slant) >= 3 ? 1 : 0) - static_cast<int>((bits >> (16 + i)) & 1))
+                                          : slant ? 2 : tall;
+                plant_blade(bx, by, height, slant, lean, greens.base, greens.mid, greens.tip);
+                if (height > tallest) {
+                    tallest = height;
+                    tallest_slant = slant;
+                }
+            }
+            if (plants >= 6 && ((bits >> 9) & 1)) {
+                const int k = tallest - 1;
+                const int sx = bx + bend(tallest_slant, k, tallest) + bend(lean, k, tallest);
+                pixel(sx, by - k, seed_color);
+                if (detail) {
+                    pixel(sx, by - k - 1, seed_color);
+                    pixel(sx + (lean < 0 ? -1 : 1), by - k, dim(seed_color));
+                }
+            }
+            break;
         }
-        fill(x + 3, y + 13, 5, 1, leaf);
-        pixel(x + 6, y + 12, leaf);
-        break;
-    }
+        case Biome::wetland: {
+            if (cell.moisture() >= 184 && (bits >> 11) % 3 == 0) {
+                // Lily pads float flat on open water, with a bloom when lush.
+                if (detail) {
+                    fill(bx - 1, by, 5, 1, pad_color);
+                    fill(bx, by - 1, 2, 1, pad_light);
+                    pixel(bx + 2, by - 1, pad_color);
+                    if (size >= 2) {
+                        fill(bx + 3, by - 3, 3, 1, pad_color);
+                        pixel(bx + 4, by - 4, pad_light);
+                    }
+                    if (plants >= 5 && ((bits >> 13) & 1)) {
+                        pixel(bx + 1, by - 2, bloom_color);
+                        pixel(bx + 1, by - 1, rgb565(250, 236, 150));
+                    }
+                } else {
+                    fill(bx, by, 3, 1, pad_color);
+                    pixel(bx + 1, by, pad_light);
+                    if (plants >= 5 && ((bits >> 13) & 1)) {
+                        pixel(bx + 1, by - 1, bloom_color);
+                    }
+                }
+                break;
+            }
+            // Reeds stand tall and thin; the lushest carry a cattail.
+            const int stalks = detail ? 1 + (size >= 1) + (size >= 3) : 1 + (size >= 2);
+            for (int i = 0; i < stalks; ++i) {
+                const int height = detail ? std::min(12, 7 + size + static_cast<int>((bits >> (14 + 2 * i)) % 3) - i)
+                                          : 3 + size / 2 + static_cast<int>((bits >> (14 + i)) & 1) - (i > 0);
+                const int sx = bx + i * 2 - (stalks > 1 ? 1 : 0);
+                const int slant = static_cast<int>((bits >> (20 + i)) % 3) - 1;
+                plant_blade(sx, by, height, detail ? slant : 0, lean, greens.base, greens.mid, greens.tip);
+                if (i == 0 && plants >= 4 && ((bits >> 12) & 1)) {
+                    const int k = height - (detail ? 3 : 2);
+                    const int hx = sx + bend(detail ? slant : 0, k, height) + bend(lean, k, height);
+                    if (detail) {
+                        fill(hx, by - k - 1, 2, 3, cattail_color);
+                    } else {
+                        fill(hx, by - k, 1, 2, cattail_color);
+                    }
+                }
+            }
+            if (detail) {
+                // Sedge at the foot of the clump.
+                pixel(bx - 2, by, greens.base);
+                pixel(bx - 2 + (lean > 0), by - 1, greens.mid);
+                pixel(bx + stalks * 2, by, greens.base);
+            }
+            break;
+        }
+        case Biome::scrub: {
+            // A stiff, spiky desert plant: it barely moves in the wind.
+            const int reach = detail ? 2 + size / 2 : 2;
+            plant_blade(bx, by, reach + 1, 0, lean / 2, greens.base, greens.mid, greens.tip);
+            for (int k = 1; k <= reach; ++k) {
+                const auto color = k == reach ? greens.tip : greens.mid;
+                pixel(bx - k, by - k + (detail ? 1 : 0), color);
+                pixel(bx + k, by - k + (detail ? 1 : 0), color);
+            }
+            if (detail) {
+                pixel(bx - reach, by, greens.base);
+                pixel(bx + reach, by, greens.base);
+            } else {
+                pixel(bx, by, greens.base);
+            }
+            break;
+        }
+        }
     }
 }
 
@@ -694,6 +910,32 @@ std::uint16_t Panel::ground_pixel(int x, int y, int tile) const {
     }
     if ((pattern & 3) == 0 && v == feature_y && u >= feature_x && u <= feature_x + tile / 8) {
         shade = 1;
+    }
+    // Scrub ground is strewn with stones: a rock in some cells, a pebble in others.
+    if (tile >= 8 && cell.biome() == Biome::scrub && (pattern >> 24) % 3 != 2) {
+        const bool rock = tile == 16 && (pattern >> 24) % 3 == 0;
+        const int rx = static_cast<int>((pattern >> 4) % unsigned(tile - 4)) + 1;
+        const int ry = static_cast<int>((pattern >> 12) % unsigned(tile - 4)) + 3;
+        if (rock && ((v == ry && u >= rx && u < rx + 3) || (v == ry - 1 && u > rx && u < rx + 3))) {
+            return v == ry - 1 || u == rx ? rgb565(120, 108, 100) : rgb565(84, 74, 70);
+        }
+        if (!rock && v == ry && (u == rx || (tile == 16 && u == rx + 1))) {
+            return u == rx ? rgb565(104, 94, 86) : rgb565(76, 66, 62);
+        }
+        // The driest ground cracks: a zigzag of darker pixels across the cell.
+        if (cell.moisture() < 32) {
+            const int length = tile == 16 ? 9 : 4;
+            const int cx0 = static_cast<int>((pattern >> 18) % unsigned(tile - length)) + 1;
+            const int cy0 = static_cast<int>((pattern >> 26) % unsigned(tile - 4)) + 2;
+            const int along = u - cx0;
+            if (along >= 0 && along < length) {
+                const int step = static_cast<int>((pattern >> (along % 8 + 2)) & 1);
+                const int wobble = (along / 2 + step) % 3 - 1;
+                if (v == cy0 + wobble) {
+                    return blend(color, 0, 110);
+                }
+            }
+        }
     }
     if (shade) {
         const auto biome = cell.biome();
@@ -888,22 +1130,30 @@ void Panel::draw_environment(int tile) {
             grade_and_shimmer(tile);
         }
     }
-    const int last_y = (camera_.top + panel_height - 1) / tile;
+    const int first_y = camera_.top / tile, last_y = (camera_.top + panel_height - 1) / tile;
+    const int first_x = camera_.left / tile, last_x = (camera_.left + panel_width - 1) / tile;
     const bool connected = state_.connected_biomes;
-    for (int y = camera_.top / tile; y <= last_y; ++y) {
-        const int first_x = camera_.left / tile;
-        const int last_x = (camera_.left + panel_width - 1) / tile;
-        for (int x = first_x; x <= last_x; ++x) {
+    // Plants reach past their own cell, sideways and upward, so the cells beside
+    // and below the view draw their plants too.
+    const int reach = tile >= 8 ? 1 : 0;
+    for (int y = first_y; y <= std::min(height - 1, last_y + reach); ++y) {
+        for (int x = std::max(0, first_x - reach); x <= std::min(width - 1, last_x + reach); ++x) {
             const int index = y * width + x;
             const auto& cell = state_.cells[index];
             const int px = x * tile - camera_.left;
             const int py = y * tile - camera_.top;
+            if (y > last_y || x < first_x || x > last_x) {
+                if (cell.plants || cell.shrub() || (cell.biome() == Biome::scrub && cell.detritus())) {
+                    plant_sprite(px, py, tile, index);
+                }
+                continue;
+            }
             if (tile < 4) {
                 const auto terrain = connected ? biome_tint(cell.biome(), cell.plants)
                     : rgb565(8 + cell.detritus() * 3, 8 + std::min(184, cell.plants * 8), 8 + cell.moisture() / 8);
                 fill(px, py, tile, tile, terrain);
             }
-            if (tile >= 4 && (cell.plants || cell.fruit())) {
+            if (tile >= 4 && (cell.plants || cell.shrub() || (cell.biome() == Biome::scrub && cell.detritus()))) {
                 plant_sprite(px, py, tile, index);
             }
             const bool collapsing = cell.carcass() && std::any_of(events_.begin(), events_.end(), [&](const LifeEvent& event) {

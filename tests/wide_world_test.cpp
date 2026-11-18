@@ -1,3 +1,4 @@
+#include <utility>
 #include "checkpoint_compat.hpp"
 #include "observation.hpp"
 #include "terrain.hpp"
@@ -257,8 +258,13 @@ void check_zoom_layers() {
             check(body != coat && count(body) == 3 && count(coat) == 1, "4× live sprite must occupy 2×2 pixels");
             check(pixel(0, 3) == carrion && pixel(1, 3) == carrion && count(carrion) == 2,
                   "4× carrion must occupy two pixels on the bottom row");
-            check(pixel(2, 3) != pixel(0, 1) && pixel(2, 3) != body && pixel(2, 3) != carrion,
-                  "4× plants must remain visible below the creature and beside carrion");
+            // Plants keep to the ring the creature and carrion leave free.
+            bool plant = false;
+            for (const auto& [x, y] : {std::pair{2, 3}, {3, 3}, {3, 2}, {3, 1}, {3, 0}, {2, 0}, {1, 0}, {0, 0}}) {
+                const auto color = pixel(x, y);
+                plant |= color != pixel(0, 1) && color != body && color != coat && color != carrion;
+            }
+            check(plant, "4× plants must remain visible around the creature and beside carrion");
         } else if (tile == 2) {
             check(pixel(0, 1) == carrion && count(carrion) == 1 && pixel(1, 1) == body && count(body) == 1,
                   "2× live sprites and carrion must occupy separate right and left pixels");

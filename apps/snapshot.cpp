@@ -1,13 +1,18 @@
 // Renders panel frames into a PNG contact sheet for reviewing graphics without the board.
 //
 //   petri_snapshot OUTPUT.png [--seed N] [--ticks N] [--frames N] [--interval-ms N] [--rain 0|1] [--ticks-per-frame N]
+//                  [--biome 0|1|2] [--x CELL --y CELL] [--storm 1]
 //
+// By default the close views follow the first creature. --biome holds the camera
+// over the most vegetated stretch of scrub (0), grassland (1), or wetland (2);
+// --x and --y hold it over a chosen cell; --storm 1 over the strongest storm.
 // Rows are views (close at zoom 4, detail at zoom 5, zoom 3, life, habitat);
 // columns are consecutive frames. Each LED is drawn as a 6x6 block with a dark gap.
 
 #include "observation.hpp"
 #include "panel.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -102,6 +107,8 @@ int main(int argc, char** argv) {
     unsigned ticks = 3000, frames = 6, interval = 100;
     bool rain = true;
     unsigned ticks_per_frame = 0;
+    int biome = -1, at_x = -1, at_y = -1;
+    bool storm = false;
     for (int i = 2; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const auto value = static_cast<unsigned>(std::strtoul(argv[i + 1], nullptr, 10));
@@ -111,12 +118,52 @@ int main(int argc, char** argv) {
         else if (option == "--interval-ms") interval = value;
         else if (option == "--rain") rain = value != 0;
         else if (option == "--ticks-per-frame") ticks_per_frame = value;
+        else if (option == "--biome") biome = int(value);
+        else if (option == "--x") at_x = int(value);
+        else if (option == "--y") at_y = int(value);
+        else if (option == "--storm") storm = value != 0;
     }
     init_crc();
     auto world = std::make_unique<World>(seed, observatory_config());
     for (unsigned t = 0; t < ticks; ++t) {
         world->step();
     }
+    if (biome >= 0) {
+        // The 8x4-cell window (the zoom 4 view) with the most of that biome and its plants or litter.
+        int best = -1;
+        for (int y = 0; y + 4 <= height; ++y) {
+            for (int x = 0; x + 8 <= width; ++x) {
+                int score = 0;
+                for (int dy = 0; dy < 4; ++dy) {
+                    for (int dx = 0; dx < 8; ++dx) {
+                        const auto& cell = world->cells()[(y + dy) * width + x + dx];
+                        if (int(biome_at(cell.moisture)) == biome) {
+                            score += 16 + std::min<int>(8, cell.plants) + std::min<int>(4, cell.detritus);
+                        }
+                    }
+                }
+                if (score > best) {
+                    best = score;
+                    at_x = x + 4;
+                    at_y = y + 2;
+                }
+            }
+        }
+    }
+    if (storm) {
+        int strongest = 0;
+        for (const auto& front : world->storms()) {
+            if (front.active() && front.strength > strongest) {
+                strongest = front.strength;
+                at_x = std::clamp(int(front.x / 256), 0, width - 1);
+                at_y = std::clamp(int(front.y / 256), 0, height - 1);
+            }
+        }
+        if (!strongest) {
+            std::fprintf(stderr, "no active storm at this tick\n");
+        }
+    }
+    const bool pinned = at_x >= 0 && at_y >= 0;
     struct View {
         PanelView view;
         std::uint8_t zoom;
@@ -137,7 +184,15 @@ int main(int argc, char** argv) {
         panel->panel().set_rain(rain);
         const auto follow = world->creatures()[0].alive() ? world->creatures()[0].id : 0;
         std::uint32_t now = 1000;
-        panel->set_camera({v.view, v.zoom, 0, 0, v.view == PanelView::close ? follow : 0}, now);
+        if (pinned && v.zoom) {
+            const int tile = 1 << (v.zoom - 1);
+            const auto origin = cell_origin(std::size_t(at_y * width + at_x), tile);
+            const int left = std::clamp(origin[0] + tile / 2 - panel_width / 2, 0, scene_width(tile) - panel_width);
+            const int top = std::clamp(origin[1] + tile / 2 - panel_height / 2, 0, height * tile - panel_height);
+            panel->set_camera({v.view, v.zoom, std::uint16_t(left), std::uint16_t(top), 0}, now);
+        } else {
+            panel->set_camera({v.view, v.zoom, 0, 0, v.view == PanelView::close ? follow : 0}, now);
+        }
         for (int warm = 0; warm < 40; ++warm) {
             now += 33;
             panel->draw(now, now * 1000, 0);

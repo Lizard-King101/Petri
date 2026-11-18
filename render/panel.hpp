@@ -89,6 +89,12 @@ private:
     void draw_contact(int tile);
     void draw_hunt();
     void plant_sprite(int x, int y, int tile, int index);
+    // Lean of a plant's tip in pixels, -3 to 3, from the storms' wind and the breeze.
+    int plant_lean(int index, std::uint32_t salt) const;
+    // One stalk or blade rising from (x, y), spreading `slant` pixels sideways at the
+    // tip and bent by the wind, shaded from base to tip.
+    void plant_blade(int x, int y, int height, int slant, int lean, std::uint16_t base, std::uint16_t mid,
+                     std::uint16_t tip);
     void sprite(int x, int y, int scale, DietShape diet, bool face_right,
                 bool stride, bool mouth_open, std::uint16_t body, std::uint8_t faction = 0, int height = 7);
     void detail_sprite(int x, int y, Look look, bool face_right,

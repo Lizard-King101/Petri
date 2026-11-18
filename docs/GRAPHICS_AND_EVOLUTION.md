@@ -136,6 +136,31 @@ Everything here is presentation and never feeds back into the biology.
   light blue-white horizontal glint. It fades in, sways a pixel either way,
   and fades out on its own 1.4–2.3 s cycle. `W` over USB, and `--rain 0` in
   `petri_snapshot`, hide rain so the water can be judged alone.
+- **Plants, first pass.**
+  - Each cell's plants are placed from a hash of the cell, so tufts no longer
+    sit at the same spot in every cell. Bases spread over the lower part of
+    the cell, and plants that reach into the next cell are drawn even when
+    their own cell is just outside the view.
+  - Density shows as tufts: up to three per cell at zoom 5 and two at zoom 4.
+  - Each biome has its own forms. Grassland grows tussocks whose blades arch
+    outward, with seed heads when lush. Grass turns to straw as moisture
+    falls toward the scrub edge. Wetland grows reeds with cattails, plus
+    lily pads and blooms on open water (moisture 184 and up). Scrub plants
+    are stiff and spiky.
+  - Scrub ground carries stones and, where driest, cracks. Both are part of
+    the cached terrain, because scrub detritus is nonzero in only about 1% of
+    cells and its plants grow only at the grassland edge. Twigs appear where
+    there is detritus.
+  - Wind follows the storms. Inside a storm plants lean up to three pixels
+    downwind and shake. Elsewhere a breeze gust rolls across the field every
+    3.4 s, in the prevailing direction.
+  - At zoom 3, plants stay on the ring of pixels the creature and carrion
+    leave free.
+  - On the board: 30 fps, worst frame 23–27 ms, unchanged from before.
+  - `petri_snapshot --biome 0|1|2`, `--x/--y`, and `--storm 1` hold the
+    camera over a biome, a cell, or the strongest storm.
+  - Still to do: smoother growth, grazing flicks from meal events, and a
+    texture for the overview.
 - **Day/night: deferred to the biology.** The simulation has no daylight,
   so lighting tied to time of day would only be decoration. It is a joint
   item: the simulation track adds daylight that affects growth and
