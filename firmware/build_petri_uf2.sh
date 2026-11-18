@@ -16,6 +16,7 @@ mkdir -p "$sketch/src" "$(dirname -- "$output")"
 cp "$repo/firmware/petri_matrix/petri_matrix.ino" "$sketch/"
 cp "$repo/core/world.cpp" "$repo/core/world.hpp" "$repo/core/nests.cpp" "$repo/core/hunting.cpp" "$repo/render/life.cpp" "$repo/render/life.hpp" "$sketch/src/"
 cp "$repo/render/panel.cpp" "$repo/render/panel.hpp" "$repo/render/terrain.hpp" "$sketch/src/"
+cp "$repo/firmware/esp32_passthrough/esp32_bridge.hpp" "$sketch/src/"
 
 cpp_flags=-std=gnu++17
 if [ "${3:-}" = --wide ]; then

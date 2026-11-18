@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <unistd.h>
 
+#include "src/esp32_bridge.hpp"
 #include "src/panel.hpp"
 #ifdef PETRI_OBSERVATORY
 #include "src/observation.hpp"
@@ -20,6 +21,8 @@ constexpr uint32_t frameMicros = 50000;
 constexpr uint32_t debounceMs = 25;
 constexpr uint32_t holdMs = 600;
 constexpr unsigned maxTicksPerLoop = 8;
+// Holding UP this long while the board starts selects the ESP32 bridge.
+constexpr uint32_t bridgeHoldMs = 300;
 
 uint8_t rgbPins[] = {7, 8, 9, 10, 11, 12};
 uint8_t addressPins[] = {17, 18, 19, 20};
@@ -92,6 +95,8 @@ struct Button {
 
 Button up(2);
 Button down(3);
+esp32_bridge::Bridge bridge;
+bool bridgeMode = false;
 bool ready = false;
 bool paused = false;
 unsigned speedIndex = 0;
@@ -219,12 +224,62 @@ void reportMetrics(uint32_t nowUs) {
     }
 }
 
+bool bridgeRequested() {
+    const uint32_t started = millis();
+    while (digitalRead(2) == LOW) {
+        if (millis() - started >= bridgeHoldMs) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void drawBridge() {
+    if (!ready) {
+        return;
+    }
+    const bool bootloader = bridge.bootloader();
+    matrix.fillScreen(0);
+    matrix.setTextWrap(false);
+    matrix.setTextColor(matrix.color565(96, 96, 96));
+    matrix.setCursor(2, 4);
+    matrix.print("ESP32 LINK");
+    matrix.setTextColor(bootloader ? matrix.color565(160, 120, 0) : matrix.color565(0, 160, 0));
+    matrix.setCursor(2, 18);
+    matrix.print(bootloader ? "BOOTLOADER" : "RUNNING");
+    matrix.show();
+}
+
+// USB serial carries esptool traffic to the ESP32 until the next reset.
+// Tap UP to run the ESP32 firmware and DOWN to return to its bootloader.
+void serviceBridge(uint32_t nowMs) {
+    const bool before = bridge.bootloader();
+    bridge.service();
+    if (up.poll(nowMs) == Gesture::tap) {
+        bridge.restart(false);
+    }
+    if (down.poll(nowMs) == Gesture::tap) {
+        bridge.restart(true);
+    }
+    if (bridge.bootloader() != before) {
+        drawBridge();
+    }
+}
+
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
+    pinMode(2, INPUT_PULLUP);
+    bridgeMode = bridgeRequested();
     up.begin();
     down.begin();
     Serial.begin(115200);
+    if (bridgeMode) {
+        bridge.begin();
+        ready = matrix.begin() == PROTOMATTER_OK;
+        drawBridge();
+        return;
+    }
 
 #ifdef PETRI_WIDE_WORLD
     // Start with established groups without decoding a large checkpoint on the stack.
@@ -250,6 +305,10 @@ void setup() {
 
 void loop() {
     const uint32_t nowMs = millis();
+    if (bridgeMode) {
+        serviceBridge(nowMs);
+        return;
+    }
     if (!ready) {
         digitalWrite(LED_BUILTIN, (nowMs / 500) % 2 ? HIGH : LOW);
         return;

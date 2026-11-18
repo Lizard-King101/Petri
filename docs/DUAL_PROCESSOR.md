@@ -35,11 +35,17 @@ Board links between the chips, from the Adafruit SAMD 1.7.17 variant:
 | ESP32 UART RX, TX | 27, 28 | `SerialESP32` (`Serial2`) |
 
 The ESP32 has no USB port of its own, so every ESP32 flash goes through the
-SAMD51. `firmware/esp32_passthrough` bridges USB to `SerialESP32`. It restarts
-the ESP32 into its ROM bootloader at boot and each time a host opens the port.
-Through this bridge, esptool connected only with `--baud 115200`. A 4 MiB read
-then took 372 seconds. One read that started from an already-running flasher
-stub at 115200 switched to 460800 and took 96 seconds.
+SAMD51. `firmware/esp32_passthrough/esp32_bridge.hpp` bridges USB to
+`SerialESP32`. The host's DTR and RTS lines drive the ESP32's GPIO0 and reset
+lines like a development board's auto-reset circuit. The bridge holds reset
+for 10 ms after the lines release it, because hosts change DTR and RTS in
+separate steps. It also writes to the TinyUSB buffer directly, because
+`Serial.write()` discards data while DTR is off. With these changes,
+esptool's default reset and hard reset work. Reads matched the backup at
+921600 baud (668 kbit/s) through the standalone bridge and at 460800
+(348 kbit/s) through Petri's bridge mode. There, panel refresh likely
+explains one byte lost at 921600. An earlier bridge without reset lines
+connected only at 115200 and read 4 MiB in 372 seconds.
 
 The ESP32 does not add usable RAM to the SAMD51. The two chips have separate
 memories, and a single world cannot be split across them efficiently.
@@ -146,9 +152,10 @@ Each stage ends with something measured on hardware or checked by a test.
 2. **ESP32 backup.** *Done.* Two full 4 MiB reads were byte-identical. The
    image, checksum, and restore steps are in the ignored `backups/` directory.
    The restore procedure has not been run. Petri firmware is back on the board.
-3. **Passthrough in Petri firmware.** Holding a button at boot bridges USB to
-   the ESP32 UART and drives GPIO0 and RESET. This removes the UF2 swap from
-   every ESP32 flash.
+3. **Passthrough in Petri firmware.** *Done.* Holding UP at boot bridges USB
+   to the ESP32 UART and maps DTR and RTS to GPIO0 and reset. Tested on the
+   board with esptool's default reset and 1 MiB reads at 460800 baud. This
+   removes the UF2 swap from every ESP32 flash.
 4. **Core port.** Build `core/` and `render/` with ESP-IDF. Match the native
    fingerprint on the device, and measure ticks per second, free heap, and the
    largest free block with no radio and with NimBLE advertising.

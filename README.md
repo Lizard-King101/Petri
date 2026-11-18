@@ -789,20 +789,34 @@ with no observed reset or telemetry gap, a peak sampled population of 97,
 and zero blocked births. The operator reported that the streaking was gone
 after flashing this build.
 
-### ESP32 passthrough UF2
+### ESP32 bridge
 
-`build/petri-esp32-passthrough.uf2` bridges the SAMD51's USB serial port
-to the ESP32 UART for esptool. At boot, and each time a host opens the port,
-it restarts the ESP32 into its ROM bootloader, and the NeoPixel turns yellow.
-Tap UP to restart the ESP32 normally (green) and watch its boot log. Tap DOWN
-to return it to the bootloader. Connect at 115200 baud.
+The ESP32 has no USB port of its own. The SAMD51 bridges its USB serial
+port to the ESP32 UART in two ways:
+
+- **Petri firmware:** hold UP while the board starts (press RESET while
+  holding UP, and keep holding for about a second). The panel shows
+  `ESP32 LINK` and the ESP32's state. Press RESET to return to Petri.
+- **Standalone:** `build/petri-esp32-passthrough.uf2` starts the bridge at
+  every boot. It is smaller and useful for recovery.
+
+The host's DTR and RTS lines drive the ESP32's reset and GPIO0 lines like the
+auto-reset circuit on ESP32 development boards. esptool's default reset and
+hard reset both work. Reads matched the backup at 921600 baud through the
+standalone bridge and at 460800 through Petri's bridge mode. In Petri's
+bridge mode, a 921600 read once lost a byte, likely because the panel's
+refresh interrupt delays the UART receiver. Tap UP to
+restart the ESP32 into its own firmware and DOWN to restart it into its
+bootloader. The NeoPixel and the bridge screen show yellow for the bootloader
+and green for the firmware.
 
 ```sh
+firmware/build_petri_uf2.sh /path/to/uf2conv.py build/petri-observatory-bridge.uf2 --observatory
 arduino-cli compile --fqbn adafruit:samd:adafruit_matrixportal_m4:usbstack=tinyusb \
   --output-dir build/esp32-passthrough firmware/esp32_passthrough
 python3 /path/to/uf2conv.py -c -b 0x4000 -f SAMD51 \
   -o build/petri-esp32-passthrough.uf2 build/esp32-passthrough/esp32_passthrough.ino.bin
-esptool --port /dev/ttyACM0 --baud 115200 --before no-reset --after no-reset flash-id
+esptool --port /dev/ttyACM0 --baud 460800 flash-id
 ```
 
 The board's ESP32 is an ESP32-D0WD-V3 with 4 MB of flash, running Adafruit
