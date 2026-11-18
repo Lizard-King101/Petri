@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace petri::selftest {
@@ -11,11 +12,16 @@ struct Host {
     void (*print)(const char* line);
     // Called about every 20 ms of stepping so an RTOS can run its idle task.
     void (*yield)();
+    // Allocates word-aligned memory for the brain benchmark, which touches it
+    // only with 32-bit loads (ESP32 instruction RAM allows nothing narrower).
+    // Null uses ordinary heap memory. `region` names what was used.
+    void* (*alloc_words)(std::size_t bytes, const char** region) = nullptr;
 };
 
 // Runs fixed configurations, printing one `FP ...` line per checkpoint and
 // `TIMING ...` / `RENDER ...` lines with measured costs. FP lines must match
-// byte for byte between builds of the same world size.
+// byte for byte between builds of the same world size. `BRAIN ...` lines time a
+// prototype of the planned creature brain (docs/EMERGENT_LIFE.md).
 void run(const Host& host);
 
 } // namespace petri::selftest

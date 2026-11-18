@@ -86,6 +86,15 @@ void selftest_task(void*) {
             std::fflush(stdout);
         },
         [] { vTaskDelay(1); },
+        [](std::size_t bytes, const char** region) -> void* {
+            // Instruction RAM first: it allows only 32-bit access and is otherwise unused.
+            if (void* iram = heap_caps_malloc(bytes, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT)) {
+                *region = "iram_32bit";
+                return iram;
+            }
+            *region = "dram";
+            return heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+        },
     });
     print_heap("after_selftest");
     std::printf("DONE core=%d\n", xPortGetCoreID());

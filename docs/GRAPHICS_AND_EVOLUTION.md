@@ -229,17 +229,13 @@ baselines, and matched-seed experiments, as the README's experiments do.
      control are in the experiments log. `Look` bits 9–20 carry the genes;
      `render/render_state.hpp` documents the layout. The observatory
      configuration leaves morphology off until the renderer draws it.
-3. **Neural controllers.**
-   - A fixed-topology int8 network of about 12 inputs, 8 hidden units, and
-     6 outputs, about 150 bytes per creature. It is inherited with mutation.
-   - It chooses movement, feeding, attack, flight, and mating.
-   - Benchmark the per-decision cost on the ESP32, and compare against the
-     rule-based controls and a neutral control.
-4. **Plants, eggs, and species.**
-   - Plant genotypes that trade growth against toxicity.
-   - Eggs and dormancy that predators can eat.
-   - Mating limited by genetic compatibility, and detection of
-     reproductively isolated clusters as candidate species.
+3. **Neural controllers, and everything after them,** moved to
+   [EMERGENT_LIFE.md](EMERGENT_LIFE.md). Matched runs showed that the current
+   rules cannot keep a food chain: carnivores die out on all 8 seeds, with
+   or without adaptive hunting or richer soil. That document holds the gap
+   analysis, a five-phase roadmap (brain and senses, trophic economics, media
+   and body plans, society and species, life history), and the Phase 1–2
+   design.
 
 ## Order
 
