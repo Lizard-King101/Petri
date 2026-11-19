@@ -262,7 +262,10 @@ World::World(std::uint32_t seed, Config config)
       storm_fronts_(dynamic_environment_ && config.storm_fronts),
       morphology_(food_web_ && config.morphology),
       neutral_morphology_(morphology_ && config.neutral_morphology),
-      climate_seed_(dynamic_environment_ ? seed : 0) {
+      climate_seed_(dynamic_environment_ ? seed : 0),
+      brains_(food_web_ && predation_ && config.brains && !sexual_reproduction_ && !adaptive_hunts_),
+      neutral_brains_(brains_ && config.neutral_brains),
+      shuffled_brains_(brains_ && config.shuffled_brains) {
     occupants_.fill(-1);
     for (int index = 0; index < width * height; ++index) {
         auto& cell = cells_[index];
@@ -340,6 +343,9 @@ World::World(std::uint32_t seed, Config config)
             std::swap(creatures_[slot].genes.faction, creatures_[other].genes.faction);
         }
     }
+    if (brains_) {
+        found_brains(seed, config.random_founder_brains);
+    }
 }
 
 std::uint32_t World::random() {
@@ -378,6 +384,10 @@ void World::step(StepObserver observer) {
     }
     if (adaptive_hunts_) {
         prepare_evasion(observer);
+    }
+    if (brains_) {
+        step_brains(observer);
+        return;
     }
     const auto first_newborn_id = next_id_;
     for (int slot = 0; slot < capacity; ++slot) {
@@ -1574,6 +1584,12 @@ std::uint64_t World::fingerprint() const {
         for (const auto store : soil_water_) {
             add(store);
         }
+    }
+    if (brains_) {
+        add(std::uint8_t(brains_));
+        add(std::uint8_t(neutral_brains_));
+        add(std::uint8_t(shuffled_brains_));
+        add(brain_hash());
     }
     if (morphology_) {
         add(std::uint8_t(morphology_));

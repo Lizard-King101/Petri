@@ -3,7 +3,8 @@ project(Petri LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 option(PETRI_WIDE_WORLD "Build the 128 by 64 habitat" OFF)
-add_library(petri_core core/world.cpp core/checkpoint.cpp core/nests.cpp core/hunting.cpp core/brain.cpp)
+add_library(petri_core core/world.cpp core/checkpoint.cpp core/nests.cpp core/hunting.cpp core/brain.cpp
+    core/brains_world.cpp)
 target_include_directories(petri_core PUBLIC core)
 target_compile_features(petri_core PUBLIC cxx_std_17)
 if(PETRI_WIDE_WORLD)
@@ -24,6 +25,10 @@ target_link_libraries(petri PRIVATE petri_core)
 
 add_executable(petri_snapshot apps/snapshot.cpp)
 target_link_libraries(petri_snapshot PRIVATE petri_render)
+
+# Breeds the founder brains in core/founder_brains.hpp.
+add_executable(petri_nursery apps/nursery.cpp)
+target_link_libraries(petri_nursery PRIVATE petri_render)
 
 find_package(Threads REQUIRED)
 add_executable(petri_observer apps/observe.cpp)
@@ -52,6 +57,9 @@ if(BUILD_TESTING)
     add_executable(petri_brain_tests tests/brain_test.cpp)
     target_link_libraries(petri_brain_tests PRIVATE petri_render)
     add_test(NAME petri_brain COMMAND petri_brain_tests)
+    add_executable(petri_brains_world_tests tests/brains_world_test.cpp)
+    target_link_libraries(petri_brains_world_tests PRIVATE petri_render)
+    add_test(NAME petri_brains_world COMMAND petri_brains_world_tests)
     add_test(NAME petri_cli_smoke COMMAND petri --seed 42 --ticks 1000)
     set_tests_properties(petri_cli_smoke PROPERTIES
         PASS_REGULAR_EXPRESSION "tick=1000")

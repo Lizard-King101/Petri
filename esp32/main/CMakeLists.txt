@@ -4,6 +4,7 @@ idf_component_register(
          ../selftest/selftest.cpp
          ${repo}/link/link.cpp ${repo}/link/messages.cpp ${repo}/render/render_stream.cpp
          ${repo}/core/world.cpp ${repo}/core/checkpoint.cpp ${repo}/core/nests.cpp ${repo}/core/hunting.cpp ${repo}/core/brain.cpp
+         ${repo}/core/brains_world.cpp
          ${repo}/render/render_state.cpp ${repo}/render/life.cpp ${repo}/render/panel.cpp ${repo}/render/observation.cpp
     INCLUDE_DIRS . ../selftest ${repo}/core ${repo}/render ${repo}/link
     PRIV_REQUIRES esp_timer bt nvs_flash esp_driver_spi esp_driver_gpio hal)

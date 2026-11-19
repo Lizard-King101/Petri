@@ -355,7 +355,7 @@ void usage(std::ostream& out) {
            "[--provisioning] [--adaptive-hunts] [--passive-prey] [--kin-avoidance] [--kin-strength 0-20] "
            "[--resemblance-strength 0-20] [--protect-similar-prey] [--hunt-threshold 0-160] [--chase-cost 0-160] "
            "[--faction-markers] [--cross-faction-hunts] [--staggered-growth] [--fruiting-plants] "
-           "[--dynamic-environment] [--storms] [--morphology] [--neutral-morphology] [--neutral] | petri --load PATH\n"
+           "[--dynamic-environment] [--storms] [--morphology] [--neutral-morphology] [--brains] [--neutral-brains] [--shuffled-brains] [--random-founder-brains] [--neutral] | petri --load PATH\n"
         << "For either form: [--ticks UINT64] [--until-births UINT64] [--save PATH] [--lineage-every TICKS] [--hunt-every TICKS] [--benchmark]\n";
 }
 
@@ -382,6 +382,7 @@ int main(int argc, char** argv) {
     bool dynamic_environment = false;
     bool storm_fronts = false;
     bool morphology = false, neutral_morphology = false;
+    bool brains = false, neutral_brains = false, shuffled_brains = false, random_founder_brains = false;
     bool hunt_tuning_supplied = false, kin_tuning_supplied = false;
     bool protect_similar_prey = false;
     unsigned hunt_threshold = petri::HuntTuning::default_threshold;
@@ -474,6 +475,17 @@ int main(int argc, char** argv) {
         if (option == "--morphology" || option == "--neutral-morphology") {
             morphology |= option == "--morphology";
             neutral_morphology |= option == "--neutral-morphology";
+            custom_start = true;
+            continue;
+        }
+        if (option == "--random-founder-brains") {
+            brains = random_founder_brains = custom_start = true;
+            continue;
+        }
+        if (option == "--brains" || option == "--neutral-brains" || option == "--shuffled-brains") {
+            brains = true;
+            neutral_brains |= option == "--neutral-brains";
+            shuffled_brains |= option == "--shuffled-brains";
             custom_start = true;
             continue;
         }
@@ -580,6 +592,14 @@ int main(int argc, char** argv) {
         std::cerr << "--morphology requires --food-web. --neutral-morphology requires --morphology.\n";
         return 2;
     }
+    if (brains && (!food_web || !predation || sexual_reproduction || adaptive_hunts || carcass_decay == 0)) {
+        std::cerr << "--brains requires --predation and --food-web, without --sexual or --adaptive-hunts.\n";
+        return 2;
+    }
+    if (brains && (save_path || load_path)) {
+        std::cerr << "Checkpoints do not hold brains yet: --brains cannot be used with --save or --load.\n";
+        return 2;
+    }
 
     petri::World world(seed, {static_cast<std::uint8_t>(nutrients), !neutral,
                              static_cast<std::uint8_t>(carcass_decay), static_cast<std::uint8_t>(initial_carrion),
@@ -588,7 +608,8 @@ int main(int argc, char** argv) {
                              {static_cast<std::uint8_t>(hunt_threshold), static_cast<std::uint8_t>(chase_cost)}, kin_avoidance,
                              {static_cast<std::uint8_t>(kin_strength), static_cast<std::uint8_t>(resemblance_strength),
                               protect_similar_prey}, faction_markers, cross_faction_hunts, staggered_growth, fruiting_plants,
-                              dynamic_environment, storm_fronts, morphology, neutral_morphology});
+                              dynamic_environment, storm_fronts, morphology, neutral_morphology,
+                              brains, neutral_brains, shuffled_brains, random_founder_brains});
     if (load_path && !read_checkpoint(load_path, world)) {
         std::cerr << "Could not read a valid checkpoint from " << load_path << '\n';
         return 1;
@@ -660,6 +681,10 @@ int main(int argc, char** argv) {
         if (metrics.population) {
             MorphologySummary::of(world).print();
         }
+    }
+    if (world.brains()) {
+        std::cout << " brains=1 neutral_brains=" << world.neutral_brains()
+                  << " shuffled_brains=" << world.shuffled_brains();
     }
     if (world.fruiting_plants()) {
         unsigned shrubs = 0, fruit_biomass = 0;

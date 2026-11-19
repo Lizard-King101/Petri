@@ -29,7 +29,6 @@ elif [ "${3:-}" = --selftest ]; then
     mkdir -p "$sketch/src" "$(dirname -- "$output")"
     cp "$repo/firmware/selftest/selftest.ino" "$sketch/"
     cp "$repo/esp32/selftest/selftest.cpp" "$repo/esp32/selftest/selftest.hpp" "$repo/core/checkpoint.cpp" \
-        "$repo/core/brain.cpp" "$repo/core/brain.hpp" \
         "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
 else
     sketch="$stage/petri_matrix"
@@ -37,7 +36,7 @@ else
     cp "$repo/firmware/petri_matrix/petri_matrix.ino" "$sketch/"
 fi
 if [ "${3:-}" != --linktest ]; then
-    cp "$repo/core/world.cpp" "$repo/core/world.hpp" "$repo/core/nests.cpp" "$repo/core/hunting.cpp" "$repo/render/life.cpp" "$repo/render/life.hpp" "$sketch/src/"
+    cp "$repo/core/world.cpp" "$repo/core/world.hpp" "$repo/core/nests.cpp" "$repo/core/hunting.cpp" "$repo/core/brain.cpp" "$repo/core/brain.hpp" "$repo/core/brains_world.cpp" "$repo/core/founder_brains.hpp" "$repo/render/life.cpp" "$repo/render/life.hpp" "$sketch/src/"
     cp "$repo/render/render_state.cpp" "$repo/render/render_state.hpp" "$sketch/src/"
     cp "$repo/render/panel.cpp" "$repo/render/panel.hpp" "$repo/render/terrain.hpp" "$sketch/src/"
     cp "$repo/firmware/esp32_passthrough/esp32_bridge.hpp" "$sketch/src/"

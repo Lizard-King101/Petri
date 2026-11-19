@@ -339,6 +339,35 @@ struct Config {
     bool morphology = false;
     // The control: morphology genes are inherited and mutate but have no effect.
     bool neutral_morphology = false;
+    // An evolved network chooses each creature's action, and all creatures
+    // decide before any acts (docs/EMERGENT_LIFE.md). Requires the food web and
+    // predation, without two-parent breeding or adaptive hunts. Checkpoints do
+    // not hold brains yet, so a brains world cannot be saved.
+    bool brains = false;
+    // Control: brains are inherited and mutate, but a seeded random choice acts.
+    bool neutral_brains = false;
+    // Control: a newborn takes the brain of a random living creature, not its parent's.
+    bool shuffled_brains = false;
+    // Founders get small random weights instead of the bred pool in
+    // founder_brains.hpp. Random founders rarely live a few hundred ticks.
+    bool random_founder_brains = false;
+};
+
+// The brains world's per-creature weights and state (core/brains_world.cpp). It
+// lives on the heap and exists only with Config::brains, so other worlds pay one
+// pointer for it.
+struct BrainState;
+class BrainStore {
+public:
+    BrainStore() = default;
+    BrainStore(const BrainStore& other);
+    BrainStore& operator=(const BrainStore& other);
+    ~BrainStore();
+    void create();
+    BrainState* get() const { return state_; }
+
+private:
+    BrainState* state_ = nullptr;
 };
 
 class World {
@@ -372,6 +401,13 @@ public:
     bool dynamic_environment() const { return dynamic_environment_; }
     bool morphology() const { return morphology_; }
     bool neutral_morphology() const { return neutral_morphology_; }
+    bool brains() const { return brains_; }
+    bool neutral_brains() const { return neutral_brains_; }
+    bool shuffled_brains() const { return shuffled_brains_; }
+    // Copies a living creature's brain_bytes weights (brain.hpp). False without brains.
+    bool brain_weights(int slot, std::int8_t* weights) const;
+    // Replaces a living creature's brain. The nursery uses it to try founders.
+    bool set_brain(int slot, const std::int8_t* weights);
     bool fruiting_shrub(std::size_t cell) const { return shrubs_[cell] != 0; }
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
     // Zero for no shrub, otherwise one plus the ripe fruit count.
@@ -441,6 +477,12 @@ private:
     int weather_bias(int index) const;
     int occupied_neighbors(int cell) const;
     void update_creature(int slot, StepObserver observer);
+    void found_brains(std::uint32_t seed, bool random_weights);
+    void step_brains(StepObserver observer);
+    void decide_brains(int first, int last);
+    void act_brain(int slot, StepObserver observer);
+    void inherit_brain(int child, int parent);
+    std::uint64_t brain_hash() const;
     struct HuntPlan {
         HuntDecision decision;
         int prey = -1, step = -1, chance = 0, chase_cost = 0, strike_cost = 0;
@@ -524,6 +566,8 @@ private:
     bool storm_fronts_ = false;
     bool morphology_ = false, neutral_morphology_ = false;
     std::uint32_t climate_seed_ = 0;
+    bool brains_ = false, neutral_brains_ = false, shuffled_brains_ = false;
+    BrainStore brain_store_;
 };
 
 } // namespace petri
