@@ -22,7 +22,7 @@ enum DirectionInput : std::uint8_t {
     in_meat,        // carcass units
     in_near,        // closeness of the nearest creature, 0 if none
     in_size,        // that creature's body size minus mine
-    in_resemblance, // its genome resemblance to mine
+    in_kin,         // how that creature is related to me: see kinship()
     in_crowd,       // creatures, closeness-weighted
     in_signal,      // signal flashes, closeness-weighted
     in_habitat,     // how much better the ground there suits my moisture preference
@@ -73,6 +73,13 @@ constexpr int quadrant(int dx, int dy) {
     return dy < 0 && dy < dx && dx <= -dy ? 0 : dx > 0 && -dx < dy && dy <= dx ? 1 : dy > 0 && -dy <= dx && dx < dy ? 2 : 3;
 }
 
+// How one creature perceives its relation to another, as a sense value. A
+// parent or child reads strongest, then a sibling or the last mate, then a
+// stranger wearing the same heritable marker. This is perception only: what a
+// creature does about its kin is left to its brain.
+inline constexpr int kin_parent_or_child = 127, kin_sibling_or_mate = 96, kin_same_marker = 48;
+int kinship(const Creature& me, const Creature& them);
+
 // One bit per cell for the scan: is a creature there, and is it flashing a
 // signal. Built once per tick, before any creature decides.
 struct Sight {
@@ -116,5 +123,11 @@ unsigned turn_for(CreatureId id, std::uint64_t tick);
 // chance in 128 of a step of 1 to 4 either way, about two changes per brain.
 // `state` is the caller's random state and is advanced. Returns the number of changes.
 int inherit(std::int8_t* child, const std::int8_t* parent, std::uint32_t& state);
+
+// Builds a child's brain from two parents, before mutation. Each hidden unit
+// comes whole from one parent, with its incoming weights, its bias, and its
+// outgoing weights, so a unit stays a working part. Each output bias comes from
+// either parent.
+void combine(std::int8_t* child, const std::int8_t* first, const std::int8_t* second, std::uint32_t& state);
 
 } // namespace petri::brain

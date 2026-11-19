@@ -210,7 +210,7 @@ void check_senses() {
                                            world.fruit_at(next) * (me.genes.digestion + 8)) >> 1);
             }
             check(in[in_step] == step_food, "The next-cell food sense is wrong");
-            check(in[in_near] || (!in[in_size] && !in[in_resemblance]), "An absent creature has traits");
+            check(in[in_near] || (!in[in_size] && !in[in_kin]), "An absent creature has traits");
             check(in[in_signal] == 0, "A signal was sensed though none was flashed");
             seen += in[in_near] != 0;
             walls += in[in_wall] != 0;
@@ -248,6 +248,74 @@ void check_senses() {
             }
             return;
         }
+    }
+}
+
+void check_kinship() {
+    Creature parent{}, child{}, sibling{}, mate{}, clan{}, stranger{};
+    parent.id = 10;
+    child.id = 20;
+    child.parent = 10;
+    sibling.id = 21;
+    sibling.other_parent = 10;
+    mate.id = 30;
+    mate.last_mate = 20;
+    clan.id = 40;
+    stranger.id = 50;
+    child.genes.faction = clan.genes.faction = 2;
+    stranger.genes.faction = 3;
+    check(kinship(parent, child) == kin_parent_or_child && kinship(child, parent) == kin_parent_or_child,
+          "A parent and its child do not sense each other as such");
+    check(kinship(child, sibling) == kin_sibling_or_mate && kinship(sibling, child) == kin_sibling_or_mate,
+          "Siblings do not sense each other");
+    check(kinship(child, mate) == kin_sibling_or_mate && kinship(mate, child) == kin_sibling_or_mate,
+          "Mates do not sense each other");
+    check(kinship(child, clan) == kin_same_marker, "A shared marker is not sensed");
+    check(kinship(child, stranger) == 0 && kinship(parent, stranger) == 0 && kinship(parent, mate) == 0,
+          "Strangers are sensed as kin");
+    check(kin_parent_or_child > kin_sibling_or_mate && kin_sibling_or_mate > kin_same_marker && kin_same_marker > 0,
+          "Closer kin must read stronger");
+}
+
+void check_combination() {
+    std::uint32_t state = 11, rng = 3;
+    std::int8_t first[brain_bytes], second[brain_bytes], child[brain_bytes];
+    for (int trial = 0; trial < 200; ++trial) {
+        fill(first, brain_bytes, state);
+        fill(second, brain_bytes, state);
+        combine(child, first, second, rng);
+        bool from_first = false, from_second = false;
+        // Each scorer unit, with its weight into the move score, comes whole from one parent.
+        for (int h = 0; h < scorer_hidden; ++h) {
+            const auto* row = child + h * scorer_unit_bytes;
+            const int out = scorer_hidden * scorer_unit_bytes + h;
+            const bool a = std::equal(row, row + scorer_unit_bytes, first + h * scorer_unit_bytes) && child[out] == first[out];
+            const bool b = std::equal(row, row + scorer_unit_bytes, second + h * scorer_unit_bytes) && child[out] == second[out];
+            check(a || b, "A scorer unit was split between parents");
+            from_first |= a;
+            from_second |= b;
+        }
+        const int head = scorer_bytes, outputs = head + head_hidden * head_unit_bytes;
+        for (int h = 0; h < head_hidden; ++h) {
+            const auto* row = child + head + h * head_unit_bytes;
+            bool a = std::equal(row, row + head_unit_bytes, first + head + h * head_unit_bytes);
+            bool b = std::equal(row, row + head_unit_bytes, second + head + h * head_unit_bytes);
+            for (int o = 0; o < head_outputs; ++o) {
+                const int at = outputs + o * (head_hidden + 1) + h;
+                a &= child[at] == first[at];
+                b &= child[at] == second[at];
+            }
+            check(a || b, "A head unit was split between parents");
+        }
+        for (int i = 0; i < brain_bytes; ++i) {
+            check(child[i] == first[i] || child[i] == second[i], "A combined brain has a weight from neither parent");
+        }
+        if (trial == 0) {
+            (void)from_first;
+            (void)from_second;
+        }
+        combine(child, first, first, rng);
+        check(std::equal(child, child + brain_bytes, first), "A brain combined with itself changed");
     }
 }
 
@@ -290,4 +358,6 @@ int main() {
     check_network();
     check_senses();
     check_inheritance();
+    check_kinship();
+    check_combination();
 }

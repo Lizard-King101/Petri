@@ -2,7 +2,8 @@
 
 // Rotating world checkpoints in the MatrixPortal M4's 2 MiB QSPI flash.
 //
-// Four slots of 96 KiB sit at the start of the flash. A slot holds a 32-byte
+// Four slots of 256 KiB sit at the start of the flash: a world with brains
+// saves up to 177 KB. A slot holds a 32-byte
 // header at its first byte and the checkpoint from byte 256. A save erases each
 // sector just before writing it, leaves the header bytes erased, writes all the
 // data, reads it back, and only then programs the header. An interrupted save
@@ -23,7 +24,7 @@ namespace petri {
 
 class CheckpointStore {
 public:
-    static constexpr std::uint32_t slot_count = 4, slot_bytes = 96 * 1024, sector_bytes = 4096;
+    static constexpr std::uint32_t slot_count = 4, slot_bytes = 256 * 1024, sector_bytes = 4096;
     static constexpr std::uint32_t data_offset = 256, header_bytes = 32, max_size = slot_bytes - data_offset;
     static constexpr std::uint32_t magic = 0x544c5350; // "PSLT"
     static constexpr std::uint16_t version = 1;

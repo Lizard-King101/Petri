@@ -6,8 +6,15 @@
 // an idle frame, and receives a command, restore chunk, or idle frame.
 //
 // At boot the ESP32 has no world. It flags `awaiting_world` until the SAMD51
-// either sends start_fresh or restores its newest checkpoint from QSPI. Saves
-// are streamed to the SAMD51 at a tick boundary when it asks for one.
+// either sends start_fresh or restores its newest checkpoint from QSPI. A
+// restore is decoded as its chunks arrive, with no buffer for the whole
+// checkpoint: a world with brains saves up to 177 KB. Saves are streamed to
+// the SAMD51 at a tick boundary when it asks for one.
+//
+// The world is the social brains world (docs/EMERGENT_LIFE.md): trophic
+// economics with two-parent breeding and nests. Its brains'
+// weights go in instruction RAM, which allows only 32-bit access and is
+// otherwise unused.
 
 #include "world_app.hpp"
 
@@ -23,6 +30,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "hal/gpio_ll.h"
 
@@ -50,15 +58,21 @@ constexpr std::size_t payloads_per_update = 6;
 constexpr std::int64_t min_update_us = 30000, paused_update_us = 1000000, telemetry_us = 1000000;
 // How long to wait for the boot handshake before starting fresh, unless a restore is under way.
 constexpr std::int64_t boot_wait_us = 5000000, boot_wait_limit_us = 30000000;
-constexpr std::size_t checkpoint_size = std::tuple_size<Checkpoint>::value;
-// Older versions restore too; the current one is the largest, so the buffer fits them all.
+// Versions 15 to 19 restore. Version 19's size varies with the population.
 constexpr bool restorable_size(std::uint32_t size) {
-    return size == checkpoint_size || size == std::tuple_size<CapacityCheckpoint>::value ||
-           size == std::tuple_size<StormCheckpoint>::value || size == std::tuple_size<ClimateCheckpoint>::value;
+    return size >= std::tuple_size<ClimateCheckpoint>::value && size <= max_checkpoint_bytes;
 }
-static_assert(std::tuple_size<CapacityCheckpoint>::value <= checkpoint_size &&
-              std::tuple_size<StormCheckpoint>::value <= checkpoint_size &&
-              std::tuple_size<ClimateCheckpoint>::value <= checkpoint_size);
+// The link task hands restore chunks to the simulation task through this many bytes.
+constexpr std::size_t restore_stream_bytes = 2 * link::payload_max;
+
+Config world_config() {
+    auto config = observatory_config();
+    config.brains = config.trophic = true;
+    config.plant_growth = 3;
+    // Two parents, nests, guarding, and provisioning: the social world.
+    config.sexual_reproduction = config.nests = config.guarding = config.provisioning = true;
+    return config;
+}
 constexpr std::size_t census_messages = (capacity + link::census_slots_per_message - 1) / link::census_slots_per_message;
 static_assert(payloads_per_update + 1 + census_messages <= pool_size);
 static_assert(link::census_header_bytes + link::census_slots_per_message * link::census_entry_bytes <= link::payload_max);
@@ -67,9 +81,12 @@ enum Boot : int { waiting, fresh, restore };
 std::atomic<int> boot_decision{waiting};
 std::atomic<bool> awaiting{true}, restoring{false};
 std::atomic<std::uint32_t> save_request{0};
-std::uint8_t* restore_buffer = nullptr;
-std::uint32_t restore_received = 0;
-std::uint32_t restore_size = 0;
+// A restore in progress. The link task receives, checks the CRC of the whole,
+// and sets `whole` or `failed`; the simulation task decodes and may set `failed`.
+enum Restore : int { none, receiving, whole, failed };
+std::atomic<int> restore_state{none};
+StreamBufferHandle_t restore_stream = nullptr;
+std::uint32_t restore_received = 0, restore_size = 0, restore_crc = 0;
 
 struct Outgoing {
     link::Type type = link::Type::idle;
@@ -101,7 +118,53 @@ T* make(const char* name, Args&&... args) {
 
 void rebuild_world() {
     world->~World();
-    new (world) World(seed, observatory_config());
+    new (world) World(seed, world_config());
+}
+
+// One block of brain weights. It goes in the instruction RAM that allows only
+// 32-bit access while a block fits there, and otherwise in the heap. A request
+// for executable memory can also be met from the byte-addressable heap under
+// its instruction address, which would spend the heap this is meant to spare:
+// the instruction RAM proper ends where that region begins.
+int weight_blocks_in_iram = 0, weight_blocks_in_heap = 0;
+
+void* allocate_weights(std::size_t bytes) {
+    constexpr std::uintptr_t shared_region = 0x400A0000;
+    void* block = heap_caps_malloc(bytes, MALLOC_CAP_EXEC | MALLOC_CAP_32BIT);
+    if (block && reinterpret_cast<std::uintptr_t>(block) < shared_region) {
+        ++weight_blocks_in_iram;
+        return block;
+    }
+    heap_caps_free(block);
+    block = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+    if (!block) {
+        std::printf("WORLD out of memory: a block of brain weights needs %u bytes, largest heap block %u\n",
+                    unsigned(bytes), unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+        std::abort();
+    }
+    ++weight_blocks_in_heap;
+    return block;
+}
+
+// The next bytes of the checkpoint being restored, or null at its end.
+const std::uint8_t* next_restore_bytes(void*, std::size_t* size) {
+    static std::uint8_t chunk[1024];
+    const auto started = esp_timer_get_time();
+    for (;;) {
+        const auto received = xStreamBufferReceive(restore_stream, chunk, sizeof(chunk), pdMS_TO_TICKS(20));
+        if (received) {
+            *size = received;
+            return chunk;
+        }
+        const int state = restore_state;
+        if (state == failed || (state == whole && xStreamBufferIsEmpty(restore_stream))) {
+            return nullptr;
+        }
+        if (esp_timer_get_time() - started > boot_wait_limit_us) {
+            restore_state = failed;
+            return nullptr;
+        }
+    }
 }
 
 void IRAM_ATTR on_setup(spi_slave_transaction_t*) {
@@ -193,7 +256,7 @@ void send_census() {
 }
 
 struct SaveStream {
-    std::uint32_t request = 0, offset = 0;
+    std::uint32_t request = 0, offset = 0, total = 0;
     Outgoing* current = nullptr;
     bool failed = false;
 };
@@ -203,8 +266,7 @@ void flush_save(SaveStream& save) {
         return;
     }
     const auto data = save.current->size;
-    link::write(link::ChunkHeader{save.offset, static_cast<std::uint32_t>(checkpoint_size), save.request},
-                save.current->data);
+    link::write(link::ChunkHeader{save.offset, save.total, save.request}, save.current->data);
     save.current->type = link::Type::checkpoint;
     save.current->size = static_cast<std::uint16_t>(link::chunk_header_bytes + data);
     xQueueSend(send_queue, &save.current, portMAX_DELAY);
@@ -217,6 +279,8 @@ void save_world(std::uint32_t request) {
     // world briefly, which keeps the snapshot consistent.
     SaveStream save;
     save.request = request;
+    // The size follows the population, which cannot change before the save ends.
+    save.total = static_cast<std::uint32_t>(world->checkpoint_bytes());
     const auto started = esp_timer_get_time();
     world->save_checkpoint([](void* context, const std::uint8_t* data, std::size_t size) {
         auto& save = *static_cast<SaveStream*>(context);
@@ -254,32 +318,33 @@ void start_world() {
     const auto waiting_since = esp_timer_get_time();
     for (;;) {
         const auto waited = esp_timer_get_time() - waiting_since;
-        if (boot_decision != waiting || waited >= boot_wait_limit_us || (!restoring && waited >= boot_wait_us)) {
+        if (boot_decision != waiting || restore_state != none || waited >= boot_wait_us) {
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    int expected = waiting;
-    const bool timed_out = boot_decision.compare_exchange_strong(expected, fresh);
-    bool restored = false;
-    if (boot_decision == restore) {
-        restored = world->load_checkpoint_in_place(restore_buffer, restore_size);
+    bool restored = false, timed_out = false;
+    if (restore_state != none) {
+        // Decode the checkpoint as it arrives. The checksum and the link's CRC
+        // are only known at the end, and a failure leaves the world unspecified.
+        restored = world->load_checkpoint_stream(next_restore_bytes, nullptr) && restore_state == whole;
         if (!restored) {
-            // A failed in-place decode leaves the world unspecified.
+            restore_state = failed;
             rebuild_world();
         }
+        boot_decision = restored ? restore : fresh;
+    } else {
+        int expected = waiting;
+        timed_out = boot_decision.compare_exchange_strong(expected, fresh);
+        // A restore that began at this very moment is dropped, not left waiting for a reader.
+        restore_state = failed;
     }
+    restoring = false;
     if (!restored) {
         for (unsigned tick = 0; tick < warmup_ticks; ++tick) {
             world->step();
         }
     }
-    // A timed-out restore may still be writing the buffer, so only free it after a decision.
-    if (!timed_out) {
-        heap_caps_free(restore_buffer);
-        restore_buffer = nullptr;
-    }
-    // The encoder and the payload pool take the space the restore buffer used.
     events = make<EventLog>("event log");
     encoder = make<stream::Encoder>("encoder");
     for (std::size_t i = 0; i < pool_size; ++i) {
@@ -448,33 +513,38 @@ void link_task(void*) {
                 }
                 break;
             case link::Command::restore_begin:
-                if (boot_open && restore_buffer && restorable_size(command.value)) {
+                if (boot_open && restore_state == none && restorable_size(command.value)) {
                     restore_size = command.value;
                     restore_received = 0;
+                    restore_crc = 0;
                     restoring = true;
-                } else if (boot_open) {
+                    restore_state = receiving;
+                } else if (boot_open && restore_state == none) {
                     boot_decision = fresh;
                 }
                 break;
             case link::Command::restore_end:
-                if (boot_open && restoring) {
-                    const bool whole = restore_received == restore_size &&
-                                       link::crc32(restore_buffer, restore_size) == command.value;
-                    restoring = false;
-                    boot_decision = whole ? restore : fresh;
+                if (restore_state == receiving) {
+                    restore_state = restore_received == restore_size && restore_crc == command.value ? whole : failed;
                 }
                 break;
             }
-        } else if (in.type == link::Type::restore && boot_open && restoring) {
+        } else if (in.type == link::Type::restore && restore_state == receiving) {
             link::ChunkHeader chunk;
-            const auto data = in.length - link::chunk_header_bytes;
-            if (link::read(body, in.length, chunk) && chunk.offset == restore_received &&
-                chunk.total == restore_size && data <= restore_size - chunk.offset) {
-                std::memcpy(restore_buffer + chunk.offset, body + link::chunk_header_bytes, data);
+            const std::size_t data = in.length - link::chunk_header_bytes;
+            if (in.length >= link::chunk_header_bytes && link::read(body, in.length, chunk) &&
+                chunk.offset == restore_received && chunk.total == restore_size &&
+                data <= restore_size - chunk.offset) {
+                const auto* bytes = body + link::chunk_header_bytes;
+                restore_crc = link::crc32(bytes, data, restore_crc);
                 restore_received += data;
+                // The simulation task decodes as fast as chunks arrive. While this
+                // waits for room, READY stays high and the SAMD51 holds the next chunk.
+                for (std::size_t sent = 0; sent < data && restore_state == receiving;) {
+                    sent += xStreamBufferSend(restore_stream, bytes + sent, data - sent, pdMS_TO_TICKS(50));
+                }
             } else {
-                restoring = false;
-                boot_decision = fresh;
+                restore_state = failed;
             }
         }
     }
@@ -485,16 +555,19 @@ void link_task(void*) {
 void start_world_app() {
     free_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
     send_queue = xQueueCreate(pool_size, sizeof(Outgoing*));
-    // The two large blocks are allocated first, while the heap is unfragmented:
-    // the restore buffer, then the world it decodes into. start_world() frees the
-    // restore buffer and then allocates the encoder and the payload pool.
+    restore_stream = xStreamBufferCreate(restore_stream_bytes, 1);
+    // The world is allocated first, while the heap is unfragmented, and
+    // constructed now so a fresh start needs no second allocation. A restore
+    // replaces it in place. Its brains' weights take the instruction RAM.
     const auto largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-    restore_buffer = static_cast<std::uint8_t*>(heap_caps_malloc(checkpoint_size, MALLOC_CAP_8BIT));
-    // Constructed now so a fresh start needs no second allocation. A restore replaces it in place.
-    world = make<World>("world", seed, observatory_config());
-    std::printf("WORLD boot restore_buffer=%d largest_block=%u world_bytes=%u checkpoint_bytes=%u free=%u\n",
-                restore_buffer ? 1 : 0, unsigned(largest), unsigned(sizeof(World)), unsigned(checkpoint_size),
-                unsigned(heap_caps_get_free_size(MALLOC_CAP_8BIT)));
+    BrainStore::set_weight_memory(allocate_weights, [](void* block) { heap_caps_free(block); });
+    world = make<World>("world", seed, world_config());
+    std::printf("WORLD boot largest_block=%u world_bytes=%u checkpoint_bytes=%u max_checkpoint_bytes=%u free=%u "
+                "free_32bit_only=%u weight_blocks_iram=%d weight_blocks_heap=%d\n",
+                unsigned(largest), unsigned(sizeof(World)), unsigned(world->checkpoint_bytes()),
+                unsigned(max_checkpoint_bytes), unsigned(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                unsigned(heap_caps_get_free_size(MALLOC_CAP_32BIT) - heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+                weight_blocks_in_iram, weight_blocks_in_heap);
     xTaskCreatePinnedToCore(link_task, "link", 6144, nullptr, 10, nullptr, 0);
-    xTaskCreatePinnedToCore(sim_task, "petri", 8192, nullptr, 5, nullptr, 1);
+    xTaskCreatePinnedToCore(sim_task, "petri", 12288, nullptr, 5, nullptr, 1);
 }

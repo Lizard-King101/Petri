@@ -58,6 +58,16 @@ std::uint32_t next(std::uint32_t& state) {
 
 } // namespace
 
+int kinship(const Creature& me, const Creature& them) {
+    if (me.has_parent(them.id) || them.has_parent(me.id)) {
+        return kin_parent_or_child;
+    }
+    if (me.close_kin(them) || (me.last_mate && me.last_mate == them.id) || (them.last_mate && them.last_mate == me.id)) {
+        return kin_sibling_or_mate;
+    }
+    return me.genes.faction && me.genes.faction == them.genes.faction ? kin_same_marker : 0;
+}
+
 Sight::Sight(const World& world) {
     for (const auto& creature : world.creatures()) {
         if (creature.alive()) {
@@ -117,7 +127,7 @@ Senses sense(const World& world, const Sight& sight, int slot, const Inner& inne
         if (nearest_slot >= 0) {
             const auto& them = creatures[nearest_slot];
             out[in_size] = input((int(them.genes.body_size) - int(me.genes.body_size)) * 8);
-            out[in_resemblance] = input(me.genes.prey_resemblance(them.genes) * 10);
+            out[in_kin] = input(kinship(me, them));
         }
         out[in_crowd] = input(crowd * 4);
         out[in_signal] = input(signal * 4);
@@ -215,6 +225,36 @@ Decision think(const Senses& senses, const std::int8_t* weights, unsigned turn) 
     decision.memory = {static_cast<std::int8_t>(activation(out[out_memory0])),
                        static_cast<std::int8_t>(activation(out[out_memory1]))};
     return decision;
+}
+
+void combine(std::int8_t* child, const std::int8_t* first, const std::int8_t* second, std::uint32_t& state) {
+    const auto pick = [&]() { return next(state) & 1u ? second : first; };
+    const std::int8_t* source = first;
+    // The scorer: each hidden unit's row, then its weight into the move score.
+    const int score_weights = scorer_hidden * scorer_unit_bytes;
+    for (int h = 0; h < scorer_hidden; ++h) {
+        source = pick();
+        for (int i = 0; i < scorer_unit_bytes; ++i) {
+            child[h * scorer_unit_bytes + i] = source[h * scorer_unit_bytes + i];
+        }
+        child[score_weights + h] = source[score_weights + h];
+    }
+    child[score_weights + scorer_hidden] = pick()[score_weights + scorer_hidden];
+    // The head: each hidden unit's row, then its weight into every output.
+    const int head = scorer_bytes, outputs = head + head_hidden * head_unit_bytes;
+    for (int h = 0; h < head_hidden; ++h) {
+        source = pick();
+        for (int i = 0; i < head_unit_bytes; ++i) {
+            child[head + h * head_unit_bytes + i] = source[head + h * head_unit_bytes + i];
+        }
+        for (int o = 0; o < head_outputs; ++o) {
+            child[outputs + o * (head_hidden + 1) + h] = source[outputs + o * (head_hidden + 1) + h];
+        }
+    }
+    for (int o = 0; o < head_outputs; ++o) {
+        const int bias = outputs + o * (head_hidden + 1) + head_hidden;
+        child[bias] = pick()[bias];
+    }
 }
 
 unsigned turn_for(CreatureId id, std::uint64_t tick) {

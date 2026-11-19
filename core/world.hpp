@@ -61,6 +61,12 @@ using Checkpoint = std::array<std::uint8_t, 6 + 153 + climate_nodes + storm_stat
                                             capacity * checkpoint_creature_bytes + 8>;
 // The SAMD51 keeps checkpoints in 96 KiB QSPI slots whose data starts at byte 256.
 static_assert(std::tuple_size<Checkpoint>::value <= 96 * 1024 - 256);
+// Version 19 (see World::checkpoint_bytes) adds four settings bytes, a meat
+// gene per slot, a count, and a record per living creature: its slot, then
+// its brain's 62 words and its state.
+inline constexpr std::size_t brain_record_bytes = 256;
+inline constexpr std::size_t max_checkpoint_bytes =
+    std::tuple_size<Checkpoint>::value + 4 + capacity + 2 + capacity * (2 + brain_record_bytes);
 
 enum class Biome : std::uint8_t { scrub, grassland, wetland };
 
@@ -197,10 +203,13 @@ struct Genome {
     // Morphology, present with Config::morphology. Founders' standard is 8, except
     // pigment, which matches background_tone().
     std::uint8_t body_size = 0, pigment = 0, pattern = 0, limbs = 0;
+    // Meat digestion as its own gene, present with Config::trophic. Zero means
+    // absent: meat digestion is then the reverse of plant digestion.
+    std::uint8_t meat = 0;
 
     int preferred_moisture() const { return 12 + moisture_preference * 12; }
 
-    int meat_digestion() const { return minimum + maximum - digestion; }
+    int meat_digestion() const { return meat ? meat : minimum + maximum - digestion; }
     int prey_resemblance(const Genome& other) const;
 };
 
@@ -341,8 +350,11 @@ struct Config {
     bool neutral_morphology = false;
     // An evolved network chooses each creature's action, and all creatures
     // decide before any acts (docs/EMERGENT_LIFE.md). Requires the food web and
-    // predation, without two-parent breeding or adaptive hunts. Checkpoints do
-    // not hold brains yet, so a brains world cannot be saved.
+    // predation, without adaptive hunts, whose fixed formulas the brain replaces.
+    // With sexual_reproduction, two adjacent creatures that both choose to breed
+    // mate; nests, guarding, and provisioning then work as under the fixed rules,
+    // and staying by the nest is the brain's choice. A brains world saves as
+    // checkpoint version 19 (see World::checkpoint_bytes).
     bool brains = false;
     // Control: brains are inherited and mutate, but a seeded random choice acts.
     bool neutral_brains = false;
@@ -351,12 +363,27 @@ struct Config {
     // Founders get small random weights instead of the bred pool in
     // founder_brains.hpp. Random founders rarely live a few hundred ticks.
     bool random_founder_brains = false;
+    // Plants grow this many times as often in the 128 by 64 world, 1 to 8. The
+    // growth clock is what limits the population: about 55 creatures at 1, 110
+    // at 2, and 230 at 4, whatever the soil nutrients.
+    std::uint8_t plant_growth = 1;
+    // Phase 2 economics for the brains world (docs/EMERGENT_LIFE.md): separate
+    // plant and meat digestion genes with gut upkeep, attacks that bite energy
+    // out of living prey instead of a capture roll, and bodies whose matter
+    // follows body size. Requires brains.
+    bool trophic = false;
+    // With trophic: the share of its upkeep that the smaller of a creature's
+    // two guts costs, in percent. At 100 a meat gut costs four times what
+    // biting earns and the gene collapses; at 0 every creature grows both guts.
+    // 25 is near break-even, so worlds can go either way.
+    std::uint8_t second_gut = 25;
 };
 
 // The brains world's per-creature weights and state (core/brains_world.cpp). It
 // lives on the heap and exists only with Config::brains, so other worlds pay one
 // pointer for it.
 struct BrainState;
+struct CheckpointReader;
 class BrainStore {
 public:
     BrainStore() = default;
@@ -365,6 +392,16 @@ public:
     ~BrainStore();
     void create();
     BrainState* get() const { return state_; }
+
+    // Where the weights of all brains live: `weight_blocks` blocks of 32-bit
+    // words, read and written only a whole word at a time. A board sets these
+    // before any brains world exists to place blocks in memory that allows
+    // nothing narrower (ESP32 instruction RAM), as many as fit there. Null uses
+    // the ordinary heap.
+    static constexpr int weight_blocks = 8;
+    using Allocate = void* (*)(std::size_t bytes);
+    using Release = void (*)(void* block);
+    static void set_weight_memory(Allocate allocate, Release release);
 
 private:
     BrainState* state_ = nullptr;
@@ -404,6 +441,18 @@ public:
     bool brains() const { return brains_; }
     bool neutral_brains() const { return neutral_brains_; }
     bool shuffled_brains() const { return shuffled_brains_; }
+    unsigned plant_growth() const { return plant_growth_; }
+    bool trophic() const { return trophic_; }
+    unsigned second_gut() const { return second_gut_; }
+    // The soil nutrients held in a creature's body, returned to the ground when it dies.
+    int body_matter(const Creature& creature) const {
+        return trophic_ && morphology_effects() ? std::max<int>(1, creature.genes.body_size) : body_mass;
+    }
+    // The nutrients a parent must carry to bud, which is also the most it can
+    // carry: enough for young one size larger than itself.
+    int birth_matter(const Creature& parent) const {
+        return trophic_ && morphology_effects() ? std::min(Genome::maximum, body_matter(parent) + 1) : body_mass;
+    }
     // Copies a living creature's brain_bytes weights (brain.hpp). False without brains.
     bool brain_weights(int slot, std::int8_t* weights) const;
     // Replaces a living creature's brain. The nursery uses it to try founders.
@@ -431,10 +480,26 @@ public:
     int storm_rain_at(std::size_t cell) const;
     const std::array<std::int32_t, climate_nodes>& soil_water() const { return soil_water_; }
     std::uint64_t fingerprint() const;
+    // Fills a current-version array. Only for worlds whose checkpoint is that
+    // size: see checkpoint_bytes().
     void save_checkpoint(Checkpoint& checkpoint) const;
     // Streams the same bytes in chunks of up to 256 bytes. Returns the total size.
     using ChunkSink = void (*)(void* context, const std::uint8_t* data, std::size_t size);
     std::size_t save_checkpoint(ChunkSink sink, void* context) const;
+    // The size save_checkpoint() will stream. A world with brains, or with
+    // plant growth other than 1, writes version 19: a version 18 checkpoint with
+    // its extra settings, the meat genes, and one record per living creature's
+    // brain. Its size varies with the population, up to max_checkpoint_bytes.
+    std::size_t checkpoint_bytes() const;
+    bool extended_checkpoint() const { return brains_ || plant_growth_ != 1; }
+    // Loads a version 18 or 19 checkpoint of any size through a staging copy.
+    bool load_checkpoint(const std::uint8_t* data, std::size_t size);
+    // Decodes a version 15 to 19 checkpoint as it arrives, directly into this
+    // world and with no buffer for the whole of it. `source` returns the next
+    // bytes and their count, or null at the end. Like load_checkpoint_in_place(),
+    // a failure leaves the world unspecified: the checksum is only known at the end.
+    using ChunkSource = const std::uint8_t* (*)(void* context, std::size_t* size);
+    bool load_checkpoint_stream(ChunkSource source, void* context);
     // Decodes a current-version checkpoint directly into this world, without a
     // staging copy. On failure the world is left in an unspecified state and must
     // be replaced. Use it only when no running world needs protecting, such as at boot.
@@ -462,6 +527,10 @@ private:
     World() = default;
     bool decode_checkpoint(const std::uint8_t* data, std::size_t size, std::uint8_t version);
     static bool decode_into(World& decoded, const std::uint8_t* data, std::size_t size, std::uint8_t version);
+    static bool decode_body(World& decoded, CheckpointReader& reader, std::uint8_t version);
+    // One living creature's brain and its state, as checkpoint bytes.
+    void export_brain(int slot, std::uint8_t* record) const;
+    bool import_brain(int slot, const std::uint8_t* record);
     std::uint32_t random();
     void update_plants();
     void update_staggered_environment();
@@ -481,7 +550,10 @@ private:
     void step_brains(StepObserver observer);
     void decide_brains(int first, int last);
     void act_brain(int slot, StepObserver observer);
-    void inherit_brain(int child, int parent);
+    void inherit_brain(int child, int parent, int mate = -1);
+    // Whether a creature chose to breed this tick, which a mate must also have done.
+    bool brain_courting(int slot) const;
+    int gut_upkeep(const Genome& effective) const;
     std::uint64_t brain_hash() const;
     struct HuntPlan {
         HuntDecision decision;
@@ -567,6 +639,9 @@ private:
     bool morphology_ = false, neutral_morphology_ = false;
     std::uint32_t climate_seed_ = 0;
     bool brains_ = false, neutral_brains_ = false, shuffled_brains_ = false;
+    std::uint8_t plant_growth_ = 1;
+    bool trophic_ = false;
+    std::uint8_t second_gut_ = 25;
     BrainStore brain_store_;
 };
 

@@ -1,5 +1,9 @@
 #include "world.hpp"
 
+#ifndef PETRI_GENERATING_WATERSHED
+#include "watershed_table.hpp"
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -164,9 +168,29 @@ constexpr auto watershed_half() {
     return terrain;
 }
 
+#if defined(__arm__) && defined(PETRI_WIDE_WORLD)
+// ARM builds read the generated table: Adafruit's 32-bit ARM compiler for
+// Windows runs out of memory evaluating the formula.
+constexpr const auto& north_watershed = watershed_table_north;
+constexpr const auto& south_watershed = watershed_table_south;
+#else
 // Separate evaluations keep the flash tables within the MCU compiler's constexpr limit.
 constexpr auto north_watershed = watershed_half<0>();
 constexpr auto south_watershed = watershed_half<height / 2>();
+#if defined(PETRI_WIDE_WORLD) && !defined(PETRI_GENERATING_WATERSHED)
+// The generated table must match the formula. If this fails, run tools/gen/watershed_table.cpp again.
+template<class Table>
+constexpr bool same_table(const Table& a, const Table& b) {
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(same_table(north_watershed, watershed_table_north) && same_table(south_watershed, watershed_table_south));
+#endif
+#endif
 
 int water_supply(int index, bool irregular) {
     if (!irregular) {
@@ -188,6 +212,7 @@ constexpr std::uint32_t kin_trait_salt = 0xb94485a9u;
 constexpr std::uint32_t founder_faction_salt = 0xa2cf4c35u;
 constexpr std::uint32_t inherited_faction_salt = 0xd28fa43bu;
 constexpr std::uint32_t shrub_salt = 0x6d2b79f5u;
+constexpr std::uint32_t meat_salt = 0x3ad8025fu;
 // One salt per morphology gene, in the order body size, pigment, pattern, limbs.
 constexpr std::uint32_t morphology_salts[] = {0x1b873593u, 0xcc9e2d51u, 0xe6546b64u, 0x5bd1e995u};
 constexpr std::uint8_t Genome::*morphology_genes[] = {&Genome::body_size, &Genome::pigment, &Genome::pattern,
@@ -207,8 +232,8 @@ bool shrub_habitat(const Cell& cell) {
     return cell.moisture >= 56 && cell.moisture <= 192;
 }
 
-constexpr bool plant_growth_tick(unsigned tick) {
-    return tick % 64 < 48 && (!wide_world || tick % 8 == 0);
+constexpr bool plant_growth_tick(unsigned tick, unsigned boost) {
+    return tick % 64 < 48 && (!wide_world || tick % 8 < boost);
 }
 
 std::uint32_t trait_roll(std::uint32_t seed, std::uint32_t id, std::uint32_t salt) {
@@ -263,9 +288,12 @@ World::World(std::uint32_t seed, Config config)
       morphology_(food_web_ && config.morphology),
       neutral_morphology_(morphology_ && config.neutral_morphology),
       climate_seed_(dynamic_environment_ ? seed : 0),
-      brains_(food_web_ && predation_ && config.brains && !sexual_reproduction_ && !adaptive_hunts_),
+      brains_(food_web_ && predation_ && config.brains && !adaptive_hunts_),
       neutral_brains_(brains_ && config.neutral_brains),
-      shuffled_brains_(brains_ && config.shuffled_brains) {
+      shuffled_brains_(brains_ && config.shuffled_brains),
+      plant_growth_(std::clamp<std::uint8_t>(config.plant_growth, 1, 8)),
+      trophic_(brains_ && config.trophic),
+      second_gut_(std::min<std::uint8_t>(config.second_gut, 100)) {
     occupants_.fill(-1);
     for (int index = 0; index < width * height; ++index) {
         auto& cell = cells_[index];
@@ -319,6 +347,9 @@ World::World(std::uint32_t seed, Config config)
         }
         if (kin_avoidance_) {
             creatures_[slot].genes.kin_reluctance = founder_trait(seed, id, kin_trait_salt);
+        }
+        if (trophic_) {
+            creatures_[slot].genes.meat = founder_trait(seed, id, meat_salt);
         }
         if (morphology_) {
             // Standing variation on separate draws, like the hunting traits. Pigment spans
@@ -400,7 +431,7 @@ void World::step(StepObserver observer) {
 
 void World::update_plants() {
     const auto tick = static_cast<unsigned>(metrics_.ticks);
-    const bool growth_tick = plant_growth_tick(tick);
+    const bool growth_tick = plant_growth_tick(tick, plant_growth_);
     for (auto& cell : cells_) {
         recycle(cell);
         if (growth_tick) {
@@ -420,7 +451,7 @@ void World::update_staggered_environment() {
             const int index = y * width + x;
             auto& cell = cells_[index];
             recycle(cell);
-            if (plant_growth_tick(local_tick)) {
+            if (plant_growth_tick(local_tick, plant_growth_)) {
                 grow_plants(cell, local_tick);
             }
             if (fruiting_plants_ && fruiting_shrub(index)) {
@@ -472,10 +503,10 @@ void World::grow_plants(Cell& cell, unsigned tick) {
             growth_rate = irregular_terrain_ ? 1 : 2;
             break;
         case Biome::grassland:
-            growth_rate = tick % (irregular_terrain_ ? 32 : 16) == 0;
+            growth_rate = tick % (irregular_terrain_ ? 32 : 16) < plant_growth_;
             break;
         case Biome::scrub:
-            growth_rate = cell.moisture >= 36 && tick % 32 == 0;
+            growth_rate = cell.moisture >= 36 && tick % 32 < plant_growth_;
             break;
         }
     }
@@ -1146,9 +1177,10 @@ void World::kill(Creature& creature, StepObserver observer, DeathCause cause) {
     }
     if (carcass_decay_) {
         auto& cell = cells_[creature.cell];
-        const int carcass = std::min(body_mass, 255 - cell.animal);
+        const int mass = body_matter(creature);
+        const int carcass = std::min(mass, 255 - cell.animal);
         cell.animal += carcass;
-        add_detritus(cell, body_mass - carcass + creature.nutrients_carried);
+        add_detritus(cell, mass - carcass + creature.nutrients_carried);
         add_detritus(cell, creature.provisions());
     }
     occupants_[creature.cell] = -1;
@@ -1184,14 +1216,16 @@ void World::reproduce(Creature& parent, int destination, StepObserver observer) 
     }
     auto& detritus = cells_[parent.cell].detritus;
     const auto available = food_web_ ? parent.nutrients_carried : detritus;
-    if (carcass_decay_ && available < body_mass) {
+    if (carcass_decay_ && available < birth_matter(parent)) {
         return;
     }
     auto* slot = birth_slot();
     if (!slot) {
         return;
     }
-    if (food_web_) {
+    if (trophic_) {
+        // The young's matter is taken below, once its body size is known.
+    } else if (food_web_) {
         parent.nutrients_carried -= body_mass;
     } else if (carcass_decay_) {
         detritus -= body_mass;
@@ -1210,6 +1244,11 @@ void World::reproduce(Creature& parent, int destination, StepObserver observer) 
     if (morphology_) {
         inherit_morphology(*slot, parent, nullptr);
     }
+    if (trophic_) {
+        slot->genes.meat = mutate_trait(parent.genes.meat, trait_roll(rng_, slot->id, meat_salt) % 8);
+        // A birth takes from the parent exactly what the young's death will return.
+        parent.nutrients_carried = static_cast<std::uint8_t>(parent.nutrients_carried - body_matter(*slot));
+    }
     // Young are provisioned in proportion to their body size.
     slot->energy = static_cast<std::uint16_t>(body_share(offspring_energy, *slot));
     parent.energy -= slot->energy + (reproduction_cost - offspring_energy);
@@ -1218,7 +1257,10 @@ void World::reproduce(Creature& parent, int destination, StepObserver observer) 
 
 bool World::can_mate(const Creature& creature) const {
     const int receptivity = trait_effects_ ? creature.genes.receptivity : 8;
-    return creature.breeding_cooldown == 0 && creature.nutrients_carried >= parental_material &&
+    // With trophic economics the young's matter follows its size, so each
+    // parent carries enough for young one size larger than itself.
+    return creature.breeding_cooldown == 0 &&
+        creature.nutrients_carried >= (trophic_ ? birth_matter(creature) : parental_material) &&
         creature.energy >= body_share(124 - receptivity * 4, creature);
 }
 
@@ -1254,7 +1296,9 @@ void World::reproduce_sexually(Creature& parent, StepObserver observer) {
         const int occupant = occupants_[cell];
         if (occupant >= 0) {
             auto& candidate = creatures_[occupant];
-            if (can_mate(candidate) && (!mate || candidate.energy > mate->energy)) {
+            // With brains, a mate is one that also chose to breed this tick.
+            if (can_mate(candidate) && (!brains_ || brain_courting(occupant)) &&
+                (!mate || candidate.energy > mate->energy)) {
                 mate = &candidate;
             }
         } else if ((!wide_world || occupied_neighbors(cell) <= 1) &&
@@ -1293,8 +1337,20 @@ void World::reproduce_sexually(Creature& parent, StepObserver observer) {
     newborn->energy = static_cast<std::uint16_t>(body_share(offspring_energy, *newborn));
     for (auto* contributor : {&parent, mate}) {
         contributor->energy -= body_share(parental_energy, *newborn);
-        contributor->nutrients_carried -= parental_material;
+        contributor->nutrients_carried -= trophic_ ? 0 : parental_material;
         contributor->breeding_cooldown = Creature::recovery_ticks;
+    }
+    if (trophic_) {
+        const auto roll = trait_roll(rng_, newborn->id, meat_salt);
+        newborn->genes.meat = mutate_trait(((roll & 1) ? *mate : parent).genes.meat, (roll >> 1) % 8);
+        // The young's matter comes from both parents: half from the one carrying
+        // less, as far as it can, and the rest from the other.
+        const int matter = body_matter(*newborn);
+        auto& lesser = parent.nutrients_carried <= mate->nutrients_carried ? parent : *mate;
+        auto& greater = &lesser == &parent ? *mate : parent;
+        const int share = std::min<int>(lesser.nutrients_carried, matter / 2);
+        lesser.nutrients_carried = static_cast<std::uint8_t>(lesser.nutrients_carried - share);
+        greater.nutrients_carried = static_cast<std::uint8_t>(greater.nutrients_carried - (matter - share));
     }
     if (nests_) {
         newborn->nest_ticks = Creature::nest_duration;
@@ -1583,6 +1639,16 @@ std::uint64_t World::fingerprint() const {
         }
         for (const auto store : soil_water_) {
             add(store);
+        }
+    }
+    if (plant_growth_ != 1) {
+        add(plant_growth_);
+    }
+    if (trophic_) {
+        add(std::uint8_t(trophic_));
+        add(second_gut_);
+        for (const auto& creature : creatures_) {
+            add(creature.genes.meat);
         }
     }
     if (brains_) {

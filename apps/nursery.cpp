@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -39,7 +40,9 @@ using Brain = std::array<std::int8_t, brain::brain_bytes>;
 
 constexpr std::array<std::uint32_t, 8> nursery_seeds{7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008};
 // A family is proven on these as well, which it never met while it was bred.
-constexpr std::array<std::uint32_t, 8> proving_seeds{7101, 7102, 7103, 7104, 7105, 7106, 7107, 7108};
+constexpr std::array<std::uint32_t, 24> proving_seeds{7101, 7102, 7103, 7104, 7105, 7106, 7107, 7108,
+                                                      7109, 7110, 7111, 7112, 7113, 7114, 7115, 7116,
+                                                      7117, 7118, 7119, 7120, 7121, 7122, 7123, 7124};
 constexpr int families_bred = 4, families_used = 1, family_size = 32, kept = 8, screened_brains = 1024;
 constexpr int trial_ticks = 600, trials_per_round = 2, viable_ticks = 4000, proving_ticks = 20000;
 constexpr int round_limit = 40;
@@ -53,10 +56,17 @@ std::uint32_t random() {
     return rng >> 8;
 }
 
+// Set by --trophic: breed for the Phase 2 physics, at the plant growth that world runs with.
+// Set by --social: the trophic world with two-parent breeding, nests, guarding, and provisioning.
+bool trophic = false, social = false;
+
 Config nursery_config() {
     auto config = observatory_config();
     config.brains = true;
     config.random_founder_brains = true;
+    config.trophic = trophic;
+    config.plant_growth = trophic ? 3 : 1;
+    config.sexual_reproduction = config.nests = config.guarding = config.provisioning = social;
     return config;
 }
 
@@ -194,11 +204,13 @@ std::vector<Brain> breed(int family) {
 
 void write(const std::vector<Brain>& pool, const char* path) {
     std::ofstream out(path, std::ios::binary);
-    out << "#pragma once\n\n// Founder brains for the brains world, bred by apps/nursery.cpp. Generated:\n"
+    const char* name = social ? "founder_pool_social" : trophic ? "founder_pool_trophic" : "founder_pool";
+    out << "#pragma once\n\n// Founder brains for the " << (social ? "social " : trophic ? "trophic " : "")
+        << "brains world, bred by apps/nursery.cpp. Generated:\n"
            "// do not edit. Rebuild the nursery and run it again after any change to the\n"
            "// senses, the network, or the brains world's physics.\n\n#include \"brain.hpp\"\n\n"
-           "namespace petri::brain {\n\ninline constexpr int founder_pool_size = "
-        << pool.size() << ";\ninline constexpr std::int8_t founder_pool[" << pool.size() << "][brain_bytes] = {\n";
+           "namespace petri::brain {\n\ninline constexpr int " << name << "_size = "
+        << pool.size() << ";\ninline constexpr std::int8_t " << name << "[" << pool.size() << "][brain_bytes] = {\n";
     for (const auto& brain : pool) {
         out << "    {";
         for (std::size_t i = 0; i < brain.size(); ++i) {
@@ -212,10 +224,15 @@ void write(const std::vector<Brain>& pool, const char* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (!wide_world || argc != 2) {
-        std::fprintf(stderr, "Usage: petri_nursery OUTPUT.hpp (from the 128 by 64 build)\n");
+    social = argc == 3 && std::string_view(argv[1]) == "--social";
+    trophic = social || (argc == 3 && std::string_view(argv[1]) == "--trophic");
+    if (!wide_world || argc != (trophic ? 3 : 2)) {
+        std::fprintf(stderr, "Usage: petri_nursery [--trophic | --social] OUTPUT.hpp (from the 128 by 64 build)\n"
+                             "Writes core/founder_brains.hpp, core/founder_brains_trophic.hpp with --trophic,\n"
+                             "or core/founder_brains_social.hpp with --social.\n");
         return 2;
     }
+    const char* output = argv[argc - 1];
     // Breed more families than are used, prove each over a long run, and keep the steadiest.
     std::vector<std::pair<int, std::vector<Brain>>> bred;
     for (int family = 0; family < families_bred; ++family) {
@@ -246,6 +263,6 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "The pool does not found self-sustaining worlds\n");
         return 1;
     }
-    write(pool, argv[1]);
-    std::printf("wrote %zu founder brains to %s\n", pool.size(), argv[1]);
+    write(pool, output);
+    std::printf("wrote %zu founder brains to %s\n", pool.size(), output);
 }

@@ -1,18 +1,11 @@
 # Emergent life: roadmap and Phase 1–2 design
 
 **Status:** November 18, 2026. Phase 1 runs natively behind `--brains`
-(`core/brains_world.cpp`), with founders bred by `apps/nursery.cpp`. It does
-worlds last on all eight seeds, but it does not pass the gates: see Results.
-Phase 2 is not started, the board has not run it, and checkpoints do not hold
-brains.
-This document supersedes simulation steps 3 and 4 of
-[GRAPHICS_AND_EVOLUTION.md](GRAPHICS_AND_EVOLUTION.md).
-
-The goal is the most advanced evolutionary ecosystem the board can run, with
-as little behavior hard-coded as possible. Creatures get senses, a brain, and
-a body. Physics and energy decide what works. Words such as "hunter",
-"herd", "aquatic", and "flying" describe what we observe in the results, never
-flags in the code.
+(`core/brains_world.cpp`) and Phase 2 behind `--trophic`, with founders bred
+by `apps/nursery.cpp`. Worlds last on all eight seeds, with thousands of kills,
+but nothing lives on meat and one founding lineage remains: see Results and
+Phase 2 results. Brains worlds save and resume (checkpoint version 19). The
+board has not run either: see On the board.
 
 ## Where the world stands
 
@@ -112,7 +105,7 @@ cells against 18), which would have built a heading into the shared scorer.
 | meat | carcass units |
 | nearest creature: closeness | 0 if none |
 | nearest creature: relative size | its body size minus mine |
-| nearest creature: resemblance | the genome similarity used by kin avoidance |
+| nearest creature: kinship | 127 for my parent or child, 96 for a sibling or my last mate, 48 for a stranger with my heritable marker, else 0 |
 | crowd | count of creatures, closeness-weighted |
 | signal | signal flashes seen, closeness-weighted |
 | habitat | how much better the ground there matches the creature's moisture preference than the ground underfoot |
@@ -330,7 +323,7 @@ a pool into `core/founder_brains.hpp`:
 - It selects only for founding a lasting population. Its seeds (7001–7008)
   are not the experiment seeds.
 - Four families are bred. Each is proven for 20,000 ticks on the nursery
-  seeds and on eight more (7101–7108) it never met, and the steadiest becomes
+  seeds and on eight more (7101–7108, since raised to 24) it never met, and the steadiest becomes
   the pool of 8 brains. With the step sense all four families reached
   viability within 40 rounds; three sustained 16 of 16 worlds and one 15.
 - Survivors of long runs make poor founders. Brains taken from the living
@@ -385,22 +378,268 @@ are not measured yet. The ESP32 gates wait for the board.
 
 ## Phase 2: trophic economics
 
-- **Energy moves up the chain.** A kill transfers a share of the prey's
-  stored energy, set by meat digestion, plus a carcass proportional to body
-  size, instead of the fixed 8-unit `body_mass`. A birth must then take the
-  same size-scaled nutrients from the parent that a death returns, or soil
-  nutrients are created or lost.
-- **Two digestion abilities.** Plant and meat digestion become independent
-  genes, and gut upkeep grows with the square of each. A generalist can
-  exist, but specialists are more efficient.
-- **Injury.** An attack costs both sides energy in proportion to the other's
-  size (and, in Phase 3, weapons and armor). A target can survive and flee,
-  so fights are real exchanges rather than a single capture roll.
-- **Carrying capacity.** Steady population barely responds to soil nutrients
-  (about 50 at both 24 and 64). The limit is in upkeep, crowding, and usable
-  habitat. Phase 2 measures which one binds and raises it so the grazer
-  population supports a predator level, aiming for 150–250 creatures in 320
-  slots.
+`--trophic` (`Config::trophic`) adds these to the brains world. It has its own
+founder pool, `core/founder_brains_trophic.hpp` (`petri_nursery --trophic`).
+
+- **Carrying capacity.** The plant growth clock is what binds. With the
+  nursery's seeds 7001–7003 at 20,000 ticks, under the fixed rules and with
+  brains alike:
+
+  | Plant growth (`--plant-growth`) | Population | Births blocked for want of a slot |
+  | ---: | ---: | --- |
+  | 1 | 43–71 | none |
+  | 2 | 99–166 | none |
+  | 4 | 188–298 | up to 980,000 |
+  | 8 | 297–320 | millions |
+
+  Soil nutrients at 24 or 64 made no difference at any setting. `--trophic`
+  runs at 3, which holds 90–166 creatures with no blocked births.
+- **Two digestion abilities.** Meat digestion is its own gene, founded at 5 to
+  11 like plant digestion. Each gut costs upkeep with the square of its gene,
+  and the smaller gut is charged 25% of its cost (`--second-gut`; see The
+  second gut's cost): a plant specialist (15 and 1) pays 0.56 energy a tick,
+  the founders' 8 and 8 nothing, and two full guts 0.78.
+- **Bites instead of a capture roll.** An attack takes energy out of the
+  target: 6 plus twice the attacker's body size less the target's, at least
+  2. The attacker keeps meat digestion / 20 of it (5% to 75%) and pays 1 plus
+  a quarter of the target's size. The target dies when its energy is gone,
+  and otherwise senses the damage and can flee.
+- **Bodies hold matter by size.** A body holds its body size in soil
+  nutrients. A birth takes the young's size from the parent, and a death
+  returns it as carcass, so nutrients are conserved (tested).
+
+### Phase 2 results
+
+Observatory world, the eight experiment seeds, 50,000 ticks, with the second
+gut at 100% of its cost, as first built. "Brains at
+growth 3" is Phase 1 with the same plant growth, to separate the physics from
+the larger population.
+
+| | Brains at growth 3 | Trophic | Trophic, shuffled control |
+| --- | ---: | ---: | ---: |
+| Seeds with a population at the end | 8 | 8 | 8 |
+| Population at the end | 89–206 | 90–166 | 70–159 |
+| Births per run | 23,553–47,143 | 43,355–53,467 | 20,726–46,816 |
+| Kills per run | 177–4,312 | 13,262–19,361 | 8,696–13,896 |
+| Attacks per run | 3,825–85,189 | 108,193–145,097 | 77,858–118,583 |
+| Mean meat gene at the end | — | 1.8–3.1 | 1.6–3.3 |
+| Mean plant digestion at the end | 15.0 | 14.9–15.0 | 15.0 |
+| Creatures eating mostly meat | 0 | 0 | 0 |
+| Founding lineages left | 1 | 1 | 1 |
+| Blocked births | 0 | 0 | 0 |
+| Native speed, ticks/s | 8,300–9,900 | 9,200–11,200 | 9,100–11,100 |
+
+- **Fights now have a reason, and it is not food.** About a third of all
+  deaths are kills, yet the meat gene falls from the founders' 5–11 to about
+  2, where an attacker keeps a tenth of what it bites out. Creatures attack
+  neighbors to clear competitors off the plants.
+- **Bodies shrink.** On seed 14 mean body size fell to 3.9 and limbs to 1.7,
+  the cheap end of both.
+- **Inheritance of behavior starts to show.** Trophic worlds have more births
+  than their shuffled controls on 7 of 8 seeds (mean 48,500 against 32,400)
+  and more kills on all 8. It is still one comparison at 50,000 ticks.
+- **Nothing lives on meat, and the arithmetic says why.** Bites move about 32
+  energy a tick through the whole world (400,000 flesh units of 4 energy in
+  50,000 ticks). A lineage with full meat digestion would keep 24 of that.
+  A creature spends about 4 a tick, so the world's entire flow of flesh feeds
+  about six full-time meat-eaters. Six is not a population that lasts.
+  Grazing meanwhile pays up to 10 energy a tick at full plant digestion.
+
+**What this means for the gates.** The meat-eater gate (over half of intake
+from meat, persisting on 6 of 8 seeds) is probably out of reach with 320
+slots. A predator level of 30 creatures needs five times the flesh flow, and
+so about five times the grazers. The choices:
+
+1. Count omnivores. Lower the cost of a second gut so creatures that graze
+   and bite can pay for both. Seed 2 already held nine with both genes at 9
+   or more.
+2. Make prey worth more: larger energy stores, or a carcass that holds the
+   energy a kill leaves.
+3. Make grazing pay less than 10 a tick, so flesh competes.
+4. Raise the slot count, which the ESP32's memory does not allow today.
+
+### The second gut's cost
+
+`--second-gut` (`Config::second_gut`) charges the smaller of a creature's two
+guts a percentage of its upkeep. Same eight seeds, 50,000 ticks, with the
+founders bred at 100%:
+
+| Second gut costs | 100% | 25% | 0% |
+| --- | ---: | ---: | ---: |
+| Mean meat gene at the end | 1.8–3.1 | 3.0–12.0 | 13.2–14.2 |
+| Worlds where it ends above 10 | 0 | 3 | 8 |
+| Kills per run | 13,262–19,361 | 15,478–29,149 | 23,636–43,326 |
+| Flesh bitten per run, units | 307,000–471,000 | 418,000–809,000 | 634,000–1,285,000 |
+| Share of energy from flesh, about | under 1% | 1–9% | 7–15% |
+| Creatures with over half their energy from flesh | 0–2 | 0–3 | 0–3 |
+| Population at the end | 90–166 | 72–153 | 77–164 |
+
+- The prediction held: at full price a meat gut costs four times what it
+  earns and the gene collapses; free, it rises to its ceiling in every world.
+  At 25%, near break-even, worlds go either way.
+- A working meat gut makes biting pay, so attacks, kills, and flesh eaten all
+  roughly double. Flesh becomes a real tenth of the energy budget.
+- It makes omnivores, not predators. Plant digestion stays at 15 everywhere
+  and at most three creatures in a world get half their energy from flesh.
+  Each world still holds one kind of creature.
+
+25% is now the default, and the trophic founders were bred again for it. The
+nursery proves each family on 32 worlds (its 8 seeds and 24 it never met);
+all four families sustained 32 of 32. With those founders, the eight
+experiment seeds at 50,000 ticks:
+
+| | Trophic at 25% | Shuffled control |
+| --- | ---: | ---: |
+| Seeds with a population at the end | 7 | 8 |
+| Population at the end, where alive | 75–146 | 71–146 |
+| Births per run, where alive | 32,067–82,530 | 12,127–16,546 |
+| Kills per run, where alive | 1,472–23,033 | 7,144–11,403 |
+| Mean meat gene at the end | 4.5–12.8 | 10.4–13.1 |
+| Worlds where it ends above 9 | 5 | 8 |
+| Founding lineages left | 1 | 1 |
+
+- **Seed 4 went extinct at founding**: 83 births, 67 of them killed. Over 200
+  fresh seeds (8001–8200) to 5,000 ticks, 3 trophic worlds failed this way
+  (1.5%) and 1 Phase 1 brains world (0.5%), each within 83 births. The
+  extinction gate asks for none, and proving a family on 32 worlds does not
+  screen out a failure this rare.
+- **Worlds take two courses.** Five end with a working meat gut and 13,675 to
+  23,033 kills. Seeds 1 and 3 keep the gene near 4.5, with about 1,500 kills
+  and the most births.
+- **Inheritance of behavior shows clearly.** Every surviving trophic world has
+  at least twice its shuffled control's births. The controls all end with a
+  high meat gene and a narrow range of kills: with behavior shuffled, the
+  worlds do not diverge.
+
+## Kinship and the social world
+
+Before this, a third of all kills in the trophic world were between parent
+and child (6,001 of 17,461 on seed 14 at 20,000 ticks; one birth in five ended
+that way). Young bud beside the parent with 40 energy, the nearest and weakest
+target, and brains could not tell kin from strangers: the resemblance sense
+compared genes that are the same in every creature, and read 17,441 of the
+17,461 victims as alike.
+
+- **Kinship sense.** The resemblance input is now kinship (see Senses). It
+  is perception only. Nothing forbids an attack on kin.
+- **Two-parent breeding under brains.** With `--sexual`, two adjacent
+  creatures that both choose to breed, and are able to, mate. Each of the
+  young's hidden units comes whole from one parent (`brain::combine`), then
+  the brain mutates. `--nests --guarding --provisioning` work as under the
+  fixed rules: the young sits in the nest for 12 ticks, a parent standing
+  beside it guards it and takes three quarters of a bite meant for it, and a
+  parent with young sets part of each meal aside and hands it over when
+  beside the nest. Returning to the nest is the brain's choice.
+- **The social world** is the trophic world with all four. It has its own
+  founders, `core/founder_brains_social.hpp` (`petri_nursery --social`); all
+  four families sustained 32 of 32 nursery worlds.
+
+Eight experiment seeds, 50,000 ticks, all founders bred again with the
+kinship sense:
+
+| | Trophic with kinship | Social | Social, shuffled control |
+| --- | ---: | ---: | ---: |
+| Seeds with a population at the end | 8 | 8 | 8 |
+| Population at the end | 66–143 | 75–131 | 69–130 |
+| Births per run | 41,340–88,654 | 10,535–14,054 | 9,062–13,527 |
+| Kills per run | 1,427–33,575 | 3,258–4,491 | 2,199–4,549 |
+| Kills between parent and child, share of kills | 2–23%, median 5% | 10–20%, median 12% | 8–18% |
+| Kills between parent and child, per 100 births | 0.04–5 | 3–7 | 3–6 |
+| Mean meat gene at the end | 2.6–13.7 | 8.9–12.5 | 8.2–14.0 |
+| Creatures with over half their energy from flesh | 0–4 | 0–1 | 0 |
+| Young fledged / starved in the nest / killed in the nest | — | 81% / 12% / 7% | 82% / 11% / 7% |
+| Founding lineages left | 1 | 1–2, median 1.5 | 1–3, median 2 |
+
+- **Parents mostly stopped killing their young** in the budding world: from
+  a third of kills to a median of 5%, and from one birth in five to under one
+  in twenty. Seed 4, which died of exactly this at founding, now lasts.
+- **Killing between strangers did not stop.** Four budding worlds still see
+  28,000 to 34,000 kills, nearly all of creatures wearing the same marker.
+- **The social world is calmer and steadier.** Kills fall to 3,000–4,500 in
+  every world, with a fifth as many births. Four fifths of young fledge.
+- **More than one founding lineage survives** for the first time: 2 in five
+  of the eight social worlds. A creature's lineage is its first parent's, so
+  this counts less strictly than under budding.
+- **Inheritance of behavior does not show in the social world.** The shuffled
+  control matches it on every measure.
+- **Still nothing lives on meat.** The meat gut is kept (gene 9–12), but the
+  flow of flesh is the same small share of energy as before.
+
+## On the board
+
+What the core now provides, tested natively:
+
+- **Checkpoint version 19.** A world with brains, or with plant growth other
+  than 1, writes version 19: a version 18 checkpoint with four settings bytes
+  after the header, then a meat gene per slot and a 258-byte record for each
+  living creature's brain and state. Its size follows the population:
+  119,551 bytes at tick 3,000 of trophic seed 14, and 177,343 at most. Other
+  worlds still write version 18 byte for byte. A trophic run saved at tick
+  3,000 and resumed for 3,000 more ends on the fingerprint of an unbroken
+  6,000-tick run.
+- **Streaming load.** `World::load_checkpoint_stream` decodes versions 15 to
+  19 as the bytes arrive, straight into the world, checking the checksum at
+  the end. The ESP32 then needs no restore buffer, which at 177 KB it could
+  not hold.
+- **Placing the weights.** `BrainStore::set_weight_memory` lets the board put
+  the 79,360-byte block of weights in memory that allows only 32-bit access.
+  The block is read and written a word at a time. The rest of a brains
+  world's state is about 8 KB of ordinary heap beside the 86,120-byte `World`.
+
+The firmware uses them, and the trophic world runs on the MatrixPortal M4
+(November 18, 2026):
+
+- **ESP32 world app** (`esp32/main/world_app.cpp`): ran the trophic world at
+  plant growth 3 for the measurements below, and now runs the social world; restores by feeding link chunks to the streaming loader
+  through an 8 KB stream buffer, with no restore buffer; reports each
+  checkpoint's real size; accepts versions 15 to 19.
+- **SAMD51 display** (`firmware/checkpoint_store.hpp`): four QSPI slots of
+  256 KiB instead of 96 KiB. Only the first old slot sits where a new one
+  does, and a board saved by earlier firmware restored that old world once,
+  through the streaming loader. A fresh start needs that slot corrupted
+  (`X` over USB) and a restart.
+- **Weights in eight blocks.** One 79,360-byte block did not fit the world
+  app's instruction RAM (76,424 bytes free; the self-test app has 81,212) and
+  fell into the heap, leaving 5 KB of it. The weights are now eight blocks of
+  40 slots. Seven sit in instruction RAM and one in the heap.
+
+Measured on the board, trophic seed 14:
+
+| | Result |
+| --- | --- |
+| Self-test fingerprints, 4 worlds at 4 ticks each | all 16 match native |
+| Self-test brain checksums (scan, network, full) | match native |
+| Trophic world fingerprint at ticks 256, 385, 457, 834, 870 | match native |
+| Save to QSPI | 1.7–1.9 s, 2 of 2 succeeded |
+| Restart and restore | resumed; fingerprint at tick 850 matches an unbroken native run |
+| Longest step, 60 to 160 creatures | 8.9–9.1 ms, so about 110 ticks/s against the gate of 40 |
+| Display | 30 fps at 8 ticks/s, the display's top speed |
+| ESP32 heap free while running | 72,628 bytes, steady |
+| Brain decision on the ESP32 | 56.1 µs: 33.2 scan, 24.7 network (26.5 from instruction RAM) |
+| Fixed-rules observatory world on the ESP32 | 200 ticks/s |
+| Social world (seed 14) fingerprint at ticks 256, 267, 891, 915 | match native |
+| Social world: save, restart, and restore | resumed; fingerprint at tick 886 matches native |
+| Social world: ESP32 heap free / longest step at 19 creatures | 72,116 bytes / 5.3 ms |
+
+The social world starts small on seed 14: 15 creatures at tick 267, 19 at
+tick 900, 49 at tick 5,000, and 99 at tick 20,000.
+
+- **Building and flashing on Windows.** Adafruit's ARM compiler for Windows
+  is a 32-bit program and ran out of memory evaluating the 128×64 terrain
+  tables at compile time. ARM builds now read them from the generated
+  `core/watershed_table.hpp` (`tools/gen/watershed_table.cpp`), and native
+  builds fail to compile if the table and the formula disagree.
+  `tools/board/flash_uf2.py` is a portable twin of `flash_uf2.sh`. The
+  capture script's RTS pulse does not reach the bridge through Windows:
+  restart the ESP32 with esptool and capture with `--no-reset`.
+
+Not done:
+
+1. A soak test, and saves under a full population (up to 177 KB).
+2. **Bluetooth** does not fit beside brains as things stand (see Memory on
+   the board). The board runs without the phone controller.
+3. The renderer draws the brains world with what it already knows. Bites
+   that do not kill, signals, and sprints are not shown.
 
 ## Experiments and gates
 
@@ -436,8 +675,9 @@ command and result, as it does today.
    keeping the current rules intact for comparison.~~ Done.
 6. ~~Build the nursery and evolve founder brains natively.~~ Done; see Results.
 7. ~~Make founding reliable.~~ Done with the step sense: 8 of 8 worlds last.
-8. Phase 2 economics, so that kills can feed a meat-eater. Then run the
-   gates at 100,000 ticks, with pigment match and clustering measured against
-   the shuffled control.
-9. Put brains in the checkpoint (a new version, streamed restore) and choose
-   where the array lives on the ESP32.
+8. ~~Phase 2 economics.~~ Built behind `--trophic`; see Phase 2 results.
+   Nothing lives on meat. Decide which of the four choices there to take
+   before running the gates at 100,000 ticks.
+9. ~~Put brains in the checkpoint.~~ Done in the core: version 19, a
+   streaming loader, and a hook that places the weights. The firmware does not
+   use them yet: see On the board.

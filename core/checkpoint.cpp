@@ -10,6 +10,9 @@ namespace petri {
 namespace {
 
 constexpr std::array<std::uint8_t, 6> header{'P', 'E', 'T', 'R', 'I', 18};
+// A world with brains, or with plant growth other than 1, writes this version instead.
+constexpr std::uint8_t extended_version = 19;
+constexpr std::uint64_t hash_start = 14695981039346656037ull, hash_prime = 1099511628211ull;
 
 // Writes a checkpoint in chunks, keeping the running FNV-1a checksum of every byte.
 struct Writer {
@@ -51,18 +54,54 @@ struct Writer {
     }
 };
 
-struct Reader {
-    const std::uint8_t* cursor;
+} // namespace
 
+// Reads from one buffer, or from a source of chunks. With a source it keeps
+// the running checksum of what it has read, since the trailer comes last.
+struct CheckpointReader {
+    const std::uint8_t* cursor;
+    const std::uint8_t* end = nullptr;
+    World::ChunkSource source = nullptr;
+    void* context = nullptr;
+    std::uint64_t hash = hash_start;
+    bool hashing = true, failed = false;
+
+    std::uint8_t next() {
+        if (!source) {
+            return *cursor++;
+        }
+        if (failed) {
+            return 0;
+        }
+        while (cursor == end) {
+            std::size_t size = 0;
+            cursor = source(context, &size);
+            end = cursor ? cursor + size : nullptr;
+            if (!cursor) {
+                // The data ran out. Zeros follow, and the caller checks `failed`.
+                failed = true;
+                return 0;
+            }
+        }
+        const auto value = *cursor++;
+        if (hashing) {
+            hash = (hash ^ value) * hash_prime;
+        }
+        return value;
+    }
     template<class Integer>
     Integer get() {
         std::uint64_t value = 0;
         for (std::size_t byte = 0; byte < sizeof(Integer); ++byte) {
-            value |= std::uint64_t(*cursor++) << (8 * byte);
+            value |= std::uint64_t(next()) << (8 * byte);
         }
         return static_cast<Integer>(value);
     }
 };
+
+namespace {
+
+using Reader = CheckpointReader;
 
 std::uint64_t checksum(const std::uint8_t* data, std::size_t size) {
     std::uint64_t hash = 14695981039346656037ull;
@@ -93,8 +132,17 @@ void World::save_checkpoint(Checkpoint& checkpoint) const {
 
 std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
     Writer writer{sink, context};
-    for (const auto byte : header) {
-        writer.put(byte);
+    const bool extended = extended_checkpoint();
+    for (std::size_t i = 0; i + 1 < header.size(); ++i) {
+        writer.put(header[i]);
+    }
+    writer.put(extended ? extended_version : header.back());
+    if (extended) {
+        // Settings come first: decoding the creatures depends on them.
+        writer.put(static_cast<std::uint8_t>(brains_ | neutral_brains_ << 1 | shuffled_brains_ << 2));
+        writer.put(std::uint8_t(trophic_));
+        writer.put(second_gut_);
+        writer.put(plant_growth_);
     }
     writer.put(rng_);
     writer.put(std::uint8_t(trait_effects_));
@@ -200,8 +248,39 @@ std::size_t World::save_checkpoint(ChunkSink sink, void* context) const {
         writer.put(creature.genes.pattern);
         writer.put(creature.genes.limbs);
     }
+    if (extended) {
+        for (const auto& creature : creatures_) {
+            writer.put(creature.genes.meat);
+        }
+        writer.put(static_cast<std::uint16_t>(brains_ ? metrics_.population : 0));
+        for (int slot = 0; brains_ && slot < capacity; ++slot) {
+            if (creatures_[slot].alive()) {
+                std::uint8_t record[brain_record_bytes];
+                export_brain(slot, record);
+                writer.put(static_cast<std::uint16_t>(slot));
+                for (const auto byte : record) {
+                    writer.put(byte);
+                }
+            }
+        }
+    }
     writer.finish();
     return writer.total;
+}
+
+std::size_t World::checkpoint_bytes() const {
+    if (!extended_checkpoint()) {
+        return std::tuple_size<Checkpoint>::value;
+    }
+    return std::tuple_size<Checkpoint>::value + 4 + capacity + 2 +
+           (brains_ ? metrics_.population * (2 + brain_record_bytes) : 0);
+}
+
+bool World::load_checkpoint(const std::uint8_t* data, std::size_t size) {
+    if (size < std::tuple_size<Checkpoint>::value || size > max_checkpoint_bytes) {
+        return false;
+    }
+    return decode_checkpoint(data, size, data[header.size() - 1]);
 }
 
 bool World::load_checkpoint(const Checkpoint& checkpoint) {
@@ -288,8 +367,11 @@ bool World::decode_checkpoint(const std::uint8_t* data, std::size_t size, std::u
 
 bool World::load_checkpoint_in_place(const std::uint8_t* data, std::size_t size) {
     // The current version or one of the three before it, identified by size.
+    // The extended version is larger than any of them, by an amount that varies.
     std::uint8_t version = 0;
-    if (size == std::tuple_size<Checkpoint>::value) {
+    if (size > std::tuple_size<Checkpoint>::value && size <= max_checkpoint_bytes) {
+        version = extended_version;
+    } else if (size == std::tuple_size<Checkpoint>::value) {
         version = header.back();
     } else if (size == std::tuple_size<CapacityCheckpoint>::value) {
         version = 17;
@@ -306,16 +388,62 @@ bool World::load_checkpoint_in_place(const std::uint8_t* data, std::size_t size)
     return decode_into(*this, data, size, version);
 }
 
+bool World::load_checkpoint_stream(ChunkSource source, void* context) {
+    this->~World();
+    new (this) World();
+    Reader reader{nullptr};
+    reader.source = source;
+    reader.context = context;
+    for (std::size_t i = 0; i + 1 < header.size(); ++i) {
+        if (reader.next() != header[i]) {
+            return false;
+        }
+    }
+    const auto version = reader.next();
+    if (version < 15 || version > extended_version || !decode_body(*this, reader, version) || reader.failed) {
+        return false;
+    }
+    // The trailer is the checksum of everything before it, and nothing follows.
+    const auto expected = reader.hash;
+    reader.hashing = false;
+    if (reader.get<std::uint64_t>() != expected || reader.failed) {
+        return false;
+    }
+    reader.next();
+    return reader.failed;
+}
+
 bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t size, std::uint8_t version) {
-    const bool legacy = version == 1;
     Reader trailer{data + size - sizeof(std::uint64_t)};
     if (!std::equal(header.begin(), header.end() - 1, data) ||
         data[header.size() - 1] != version ||
         trailer.get<std::uint64_t>() != checksum(data, size)) {
         return false;
     }
-
     Reader reader{data + header.size()};
+    // Every version before the extended one has a fixed size, which its array
+    // type checked. The extended one must end exactly at the trailer.
+    return decode_body(decoded, reader, version) &&
+           (version < extended_version || reader.cursor == data + size - sizeof(std::uint64_t));
+}
+
+bool World::decode_body(World& decoded, Reader& reader, std::uint8_t version) {
+    const bool legacy = version == 1;
+    if (version >= extended_version) {
+        const auto modes = reader.get<std::uint8_t>(), trophic = reader.get<std::uint8_t>();
+        const auto second_gut = reader.get<std::uint8_t>(), growth = reader.get<std::uint8_t>();
+        const bool brains = modes & 1;
+        if (modes > 7 || (!brains && modes) || trophic > 1 || (trophic && !brains) || second_gut > 100 ||
+            growth < 1 || growth > 8 || (!brains && growth == 1)) {
+            return false;
+        }
+        decoded.brains_ = brains;
+        decoded.neutral_brains_ = modes & 2;
+        decoded.shuffled_brains_ = modes & 4;
+        decoded.trophic_ = trophic;
+        decoded.second_gut_ = second_gut;
+        decoded.plant_growth_ = growth;
+    }
     decoded.rng_ = reader.get<std::uint32_t>();
     const auto trait_effects = reader.get<std::uint8_t>();
     if (trait_effects > 1) {
@@ -691,7 +819,7 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
                                       : creature.genes.moisture_preference != 0) ||
             creature.excursion > Excursion::hunted ||
             (!decoded.connected_biomes_ && creature.excursion != Excursion::none) ||
-            creature.nutrients_carried > body_mass ||
+            creature.nutrients_carried > (decoded.trophic_ ? int(Genome::maximum) : body_mass) ||
             (!decoded.food_web_ && creature.nutrients_carried) ||
             creature.founder == 0 || creature.founder > founder_count) {
             return false;
@@ -762,7 +890,47 @@ bool World::decode_into(World& decoded, const std::uint8_t* data, std::size_t si
         decoded.occupants_[creature.cell] = slot;
         ++metrics.population;
     }
-    if (decoded.carcass_decay_) {
+    if (version >= extended_version) {
+        // Brains need the food web with predation, and replace adaptive hunts.
+        if (decoded.brains_ && (!decoded.food_web_ || !decoded.predation_ || decoded.adaptive_hunts_)) {
+            return false;
+        }
+        for (auto& creature : decoded.creatures_) {
+            const auto meat = reader.get<std::uint8_t>();
+            if (creature.alive() && decoded.trophic_ ? !valid_trait(meat) : meat != 0) {
+                return false;
+            }
+            creature.genes.meat = meat;
+            if (creature.alive() && (creature.nutrients_carried > decoded.birth_matter(creature) ||
+                                     creature.energy > decoded.max_energy(creature))) {
+                return false;
+            }
+        }
+        const auto records = reader.get<std::uint16_t>();
+        if (records != (decoded.brains_ ? living : 0)) {
+            return false;
+        }
+        if (decoded.brains_) {
+            decoded.brain_store_.create();
+        }
+        int previous = -1;
+        for (unsigned n = 0; n < records; ++n) {
+            const int slot = reader.get<std::uint16_t>();
+            std::uint8_t record[brain_record_bytes];
+            for (auto& byte : record) {
+                byte = reader.get<std::uint8_t>();
+            }
+            // One record for each living creature, in slot order.
+            if (slot <= previous || slot >= capacity || !decoded.creatures_[slot].alive() ||
+                !decoded.import_brain(slot, record)) {
+                return false;
+            }
+            previous = slot;
+        }
+    }
+    // With trophic economics a body holds its own size in matter, and the
+    // founders' bodies are gone, so the total has no fixed remainder to check.
+    if (decoded.carcass_decay_ && !decoded.trophic_) {
         total_material += living * body_mass;
         const auto founder_material = founder_count * body_mass;
         if (total_material < founder_material ||

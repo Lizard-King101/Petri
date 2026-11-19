@@ -4,7 +4,10 @@
 
 Requires a bridge on the SAMD51 (build/petri-esp32-passthrough.uf2, which
 tools/board/flash_esp32.sh leaves there). Unless --no-reset is given it first
-restarts the ESP32 into its firmware through the bridge's RTS line. Every line
+restarts the ESP32 into its firmware through the bridge's RTS line. On
+Windows that pulse does not reach the bridge reliably: restart the ESP32 with
+`python -m esptool --port PORT --after hard_reset chip_id` and pass --no-reset
+straight after. Every line
 goes to OUTPUT.txt; lines starting with BOOT, HEAP, FP, TIMING, RENDER, BRAIN,
 SELFTEST, DONE, or BLE, and crash reports, are also printed. It stops at DONE,
 or a few seconds after a crash, or after SECONDS. PETRI_PORT overrides the
@@ -23,9 +26,16 @@ def main():
     if len(sys.argv) not in (3, 4):
         sys.exit(__doc__)
     output, limit = sys.argv[1], float(sys.argv[2])
-    port = serial.Serial(os.environ.get('PETRI_PORT', '/dev/ttyACM0'), 115200, timeout=0.5)
+    # Open with both lines off, so that opening alone neither resets the ESP32
+    # nor selects its bootloader.
+    port = serial.Serial()
+    port.port = os.environ.get('PETRI_PORT', '/dev/ttyACM0')
+    port.baudrate = 115200
+    port.timeout = 0.5
+    port.dtr = False
+    port.rts = False
+    port.open()
     if '--no-reset' not in sys.argv[3:]:
-        port.dtr = False
         port.rts = True
         time.sleep(0.1)
         port.rts = False

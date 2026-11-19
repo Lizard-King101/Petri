@@ -11,6 +11,8 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <vector>
 #include <system_error>
 #include <unistd.h>
 
@@ -27,13 +29,24 @@ bool read_checkpoint(const char* path, petri::World& world) {
     std::ifstream file(path, std::ios::binary);
     std::error_code error;
     const auto length = std::filesystem::file_size(path, error);
+    const auto load = [&world](const auto& data) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(data)>, std::vector<std::uint8_t>>) {
+            return world.load_checkpoint(data.data(), data.size());
+        } else {
+            return world.load_checkpoint(data);
+        }
+    };
     const auto read = [&](auto& data) {
         return file.read(reinterpret_cast<char*>(data.data()), data.size()) &&
-               file.peek() == std::char_traits<char>::eof() && file.eof() && !file.bad() &&
-               world.load_checkpoint(data);
+               file.peek() == std::char_traits<char>::eof() && file.eof() && !file.bad() && load(data);
     };
     if (error) {
         return false;
+    }
+    if (length > petri::Checkpoint{}.size() && length <= petri::max_checkpoint_bytes) {
+        // Version 19: a world with brains, whose size varies with its population.
+        std::vector<std::uint8_t> data(length);
+        return read(data);
     }
     if (length == petri::LegacyCheckpoint{}.size()) {
         petri::LegacyCheckpoint data;
@@ -108,8 +121,12 @@ bool read_checkpoint(const char* path, petri::World& world) {
 }
 
 bool write_checkpoint(const char* path, const petri::World& world) {
-    petri::Checkpoint data;
-    world.save_checkpoint(data);
+    std::vector<std::uint8_t> data;
+    data.reserve(world.checkpoint_bytes());
+    world.save_checkpoint([](void* context, const std::uint8_t* bytes, std::size_t size) {
+        auto& out = *static_cast<std::vector<std::uint8_t>*>(context);
+        out.insert(out.end(), bytes, bytes + size);
+    }, &data);
 
     // Stage beside the destination so an interrupted write leaves the old file readable.
     auto temporary = std::string(path) + ".XXXXXX";
@@ -355,7 +372,7 @@ void usage(std::ostream& out) {
            "[--provisioning] [--adaptive-hunts] [--passive-prey] [--kin-avoidance] [--kin-strength 0-20] "
            "[--resemblance-strength 0-20] [--protect-similar-prey] [--hunt-threshold 0-160] [--chase-cost 0-160] "
            "[--faction-markers] [--cross-faction-hunts] [--staggered-growth] [--fruiting-plants] "
-           "[--dynamic-environment] [--storms] [--morphology] [--neutral-morphology] [--brains] [--neutral-brains] [--shuffled-brains] [--random-founder-brains] [--neutral] | petri --load PATH\n"
+           "[--dynamic-environment] [--storms] [--morphology] [--neutral-morphology] [--brains] [--neutral-brains] [--shuffled-brains] [--random-founder-brains] [--plant-growth 1-8] [--trophic] [--second-gut 0-100] [--neutral] | petri --load PATH\n"
         << "For either form: [--ticks UINT64] [--until-births UINT64] [--save PATH] [--lineage-every TICKS] [--hunt-every TICKS] [--benchmark]\n";
 }
 
@@ -383,6 +400,9 @@ int main(int argc, char** argv) {
     bool storm_fronts = false;
     bool morphology = false, neutral_morphology = false;
     bool brains = false, neutral_brains = false, shuffled_brains = false, random_founder_brains = false;
+    unsigned plant_growth = 0;
+    bool trophic = false;
+    unsigned second_gut = petri::Config{}.second_gut;
     bool hunt_tuning_supplied = false, kin_tuning_supplied = false;
     bool protect_similar_prey = false;
     unsigned hunt_threshold = petri::HuntTuning::default_threshold;
@@ -478,6 +498,10 @@ int main(int argc, char** argv) {
             custom_start = true;
             continue;
         }
+        if (option == "--trophic") {
+            brains = trophic = custom_start = true;
+            continue;
+        }
         if (option == "--random-founder-brains") {
             brains = random_founder_brains = custom_start = true;
             continue;
@@ -494,7 +518,9 @@ int main(int argc, char** argv) {
             if ((option == "--seed" && parse(value, seed)) ||
                 (option == "--nutrients" && parse(value, nutrients) && nutrients <= 255) ||
                 (option == "--carcass-decay" && parse(value, carcass_decay) && carcass_decay <= 255) ||
-                (option == "--initial-carrion" && parse(value, initial_carrion) && initial_carrion <= 100)) {
+                (option == "--initial-carrion" && parse(value, initial_carrion) && initial_carrion <= 100) ||
+                (option == "--plant-growth" && parse(value, plant_growth) && plant_growth >= 1 && plant_growth <= 8) ||
+                (option == "--second-gut" && parse(value, second_gut) && second_gut <= 100)) {
                 custom_start = true;
                 continue;
             }
@@ -592,13 +618,13 @@ int main(int argc, char** argv) {
         std::cerr << "--morphology requires --food-web. --neutral-morphology requires --morphology.\n";
         return 2;
     }
-    if (brains && (!food_web || !predation || sexual_reproduction || adaptive_hunts || carcass_decay == 0)) {
-        std::cerr << "--brains requires --predation and --food-web, without --sexual or --adaptive-hunts.\n";
+    if (brains && (!food_web || !predation || adaptive_hunts || carcass_decay == 0)) {
+        std::cerr << "--brains requires --predation and --food-web, without --adaptive-hunts.\n";
         return 2;
     }
-    if (brains && (save_path || load_path)) {
-        std::cerr << "Checkpoints do not hold brains yet: --brains cannot be used with --save or --load.\n";
-        return 2;
+    if (plant_growth == 0) {
+        // The trophic world is tuned at three times the plant growth, about 170 creatures.
+        plant_growth = trophic ? 3 : 1;
     }
 
     petri::World world(seed, {static_cast<std::uint8_t>(nutrients), !neutral,
@@ -609,7 +635,9 @@ int main(int argc, char** argv) {
                              {static_cast<std::uint8_t>(kin_strength), static_cast<std::uint8_t>(resemblance_strength),
                               protect_similar_prey}, faction_markers, cross_faction_hunts, staggered_growth, fruiting_plants,
                               dynamic_environment, storm_fronts, morphology, neutral_morphology,
-                              brains, neutral_brains, shuffled_brains, random_founder_brains});
+                              brains, neutral_brains, shuffled_brains, random_founder_brains,
+                              static_cast<std::uint8_t>(plant_growth), trophic,
+                              static_cast<std::uint8_t>(second_gut)});
     if (load_path && !read_checkpoint(load_path, world)) {
         std::cerr << "Could not read a valid checkpoint from " << load_path << '\n';
         return 1;
@@ -684,7 +712,23 @@ int main(int argc, char** argv) {
     }
     if (world.brains()) {
         std::cout << " brains=1 neutral_brains=" << world.neutral_brains()
-                  << " shuffled_brains=" << world.shuffled_brains();
+                  << " shuffled_brains=" << world.shuffled_brains() << " trophic=" << world.trophic();
+        if (world.trophic() && metrics.population) {
+            unsigned meat = 0, carnivores = 0, omnivores = 0, biters = 0;
+            for (const auto& creature : world.creatures()) {
+                if (creature.alive()) {
+                    // A flesh unit is about 4 energy and a plant unit at most 1.5.
+                    biters += 8ull * creature.animal_eaten >= 3ull * creature.plants_eaten &&
+                              creature.animal_eaten >= 8;
+                    meat += creature.genes.meat;
+                    carnivores += creature.genes.meat >= 11 && creature.genes.digestion <= 6;
+                    omnivores += creature.genes.meat >= 9 && creature.genes.digestion >= 9;
+                }
+            }
+            std::cout << " second_gut=" << world.second_gut() << " mean_meat_gene=" << double(meat) / metrics.population
+                      << " meat_guts=" << carnivores << " double_guts=" << omnivores
+                      << " half_energy_from_flesh=" << biters;
+        }
     }
     if (world.fruiting_plants()) {
         unsigned shrubs = 0, fruit_biomass = 0;
