@@ -184,7 +184,7 @@ Implemented natively in stage 6 (`render/render_state.hpp`,
 
 The SAMD51 is the SPI master and the ESP32 is the slave, the same roles the
 stock coprocessor firmware uses. `link/link.hpp` defines the frames. Stage 5
-measured the link on the board (see the README's SPI link test).
+measured the link on the board (see the [lab notebook](LAB_NOTEBOOK.md)'s SPI link test).
 
 | Signal | SAMD51 | ESP32 |
 | --- | --- | --- |
@@ -279,7 +279,7 @@ Each stage ends with something measured on hardware or checked by a test.
 4. **Core port.** *Done.* `esp32/` builds the core and renderer with ESP-IDF
    v5.5.6 and runs `esp32/selftest` on core 1. All 16 fingerprints matched
    native, with and without NimBLE. The same self-test also matched on the
-   SAMD51. The README records the timing and heap tables. Findings:
+   SAMD51. The [lab notebook](LAB_NOTEBOOK.md) records the timing and heap tables. Findings:
    - The observatory world runs at about 242 ticks/s on one ESP32 core and
      103 ticks/s on the SAMD51, a 2.35× gain per core. That is 3× the
      panel's 80 ticks/s maximum. Running the core from IRAM did not help.
@@ -391,13 +391,13 @@ Each stage ends with something measured on hardware or checked by a test.
    phone app.
 10. **Ecology.** Exact early-outs in `recycle` and `grow_plants` made the
     native observatory world 8% faster and the default 128×64 world 92%
-    faster (README, Environment early-outs). A deterministic share of the
+    faster (lab notebook, Environment early-outs). A deterministic share of the
     cells could still move to core 0. Then add evolvable fixed-topology int8 neural controllers, costed
     body traits, plant genetics, dormant eggs, and compatibility-based
     speciation.
 
 World compaction is done (November 18, 2026): the wide `World` is
-72,664 bytes, down from 109,008. See the README's memory layout section.
+72,664 bytes, down from 109,008. See the [lab notebook](LAB_NOTEBOOK.md)'s memory layout section.
 
 ## Options kept open
 

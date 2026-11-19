@@ -259,7 +259,7 @@ of the tick.
   their own array in that 32-bit-only memory. Weights are packed four to a
   word and read with 32-bit loads, and writes (mutation, restore) use word
   read-modify-write.
-- **That memory is too small with Bluetooth on.** The README's heap table
+- **That memory is too small with Bluetooth on.** The [lab notebook](LAB_NOTEBOOK.md)'s heap table
   records 81,212 bytes of it free without a radio and 34,152 with NimBLE
   advertising. Even without a radio the array leaves under 2 KB of it. With Bluetooth the array must shrink or move. The options,
   cheapest first: tune NimBLE's buffers and measure again; split the array

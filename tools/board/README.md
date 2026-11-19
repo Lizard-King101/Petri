@@ -1,9 +1,10 @@
 # Board tools
 
 Scripts for flashing and driving the MatrixPortal M4 from a Linux host. The
-toolchain is described in the main README: arduino-cli with the Adafruit
-SAMD core and Protomatter, ESP-IDF v5.5.6, esptool, and `uf2conv.py`. The
-serial port needs the udev rule from the README's ESP32 bridge section.
+toolchain is described in the [main README](../../README.md#build-the-firmware):
+arduino-cli with the Adafruit SAMD core and Protomatter, ESP-IDF v5.5.6,
+esptool, and `uf2conv.py`. The serial port needs the udev rule from the lab
+notebook's [ESP32 bridge](../../docs/LAB_NOTEBOOK.md#esp32-bridge) section.
 
 All scripts default to `/dev/ttyACM0`; set `PETRI_PORT` to use another.
 `flash_esp32.sh` uses ESP-IDF if the shell has already loaded it (with

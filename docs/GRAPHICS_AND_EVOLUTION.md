@@ -200,7 +200,7 @@ Everything here is presentation and never feeds back into the biology.
 ## Simulation track (ESP32)
 
 Every change to the biology gets a new checkpoint version, fresh native
-baselines, and matched-seed experiments, as the README's experiments do.
+baselines, and matched-seed experiments, as the [lab notebook](LAB_NOTEBOOK.md)'s experiments do.
 
 1. **Room and capacity.**
    - Move the `World` and the encoder shadow to the heap, so Bluetooth fits
@@ -214,7 +214,7 @@ baselines, and matched-seed experiments, as the README's experiments do.
      Early-outs in `recycle` and `grow_plants` are byte-identical across 68
      matched runs and speed the native observatory world by 8%. Capacity is
      320 (checkpoint version 17, 92,938 bytes at 128×64), with 16-bit slots
-     and slot-range creature records in the stream. See the README's memory
+     and slot-range creature records in the stream. See the [lab notebook](LAB_NOTEBOOK.md)'s memory
      layout section and DUAL_PROCESSOR.md for the figures. Heap use with
      Bluetooth up is not yet measured on the board.
 2. **Morphology genes with costs.**
