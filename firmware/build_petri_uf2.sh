@@ -29,6 +29,7 @@ elif [ "${3:-}" = --selftest ]; then
     mkdir -p "$sketch/src" "$(dirname -- "$output")"
     cp "$repo/firmware/selftest/selftest.ino" "$sketch/"
     cp "$repo/esp32/selftest/selftest.cpp" "$repo/esp32/selftest/selftest.hpp" "$repo/core/checkpoint.cpp" \
+        "$repo/core/brain.cpp" "$repo/core/brain.hpp" \
         "$repo/render/observation.cpp" "$repo/render/observation.hpp" "$sketch/src/"
 else
     sketch="$stage/petri_matrix"

@@ -20,8 +20,8 @@ struct Host {
 
 // Runs fixed configurations, printing one `FP ...` line per checkpoint and
 // `TIMING ...` / `RENDER ...` lines with measured costs. FP lines must match
-// byte for byte between builds of the same world size. `BRAIN ...` lines time a
-// prototype of the planned creature brain (docs/EMERGENT_LIFE.md).
+// byte for byte between builds of the same world size. `BRAIN ...` lines time the
+// creature brain in core/brain.cpp (docs/EMERGENT_LIFE.md).
 void run(const Host& host);
 
 } // namespace petri::selftest

@@ -348,6 +348,8 @@ public:
 
     const auto& cells() const { return cells_; }
     const auto& creatures() const { return creatures_; }
+    // The creature slot occupying a cell, or -1.
+    int occupant(std::size_t cell) const { return occupants_[cell]; }
     const Metrics& metrics() const { return metrics_; }
     std::uint8_t carcass_decay() const { return carcass_decay_; }
     bool predation() const { return predation_; }
@@ -372,6 +374,8 @@ public:
     bool neutral_morphology() const { return neutral_morphology_; }
     bool fruiting_shrub(std::size_t cell) const { return shrubs_[cell] != 0; }
     int fruit_at(std::size_t cell) const { return fruiting_shrub(cell) ? shrubs_[cell] - 1 : 0; }
+    // Zero for no shrub, otherwise one plus the ripe fruit count.
+    int shrub_stock(std::size_t cell) const { return shrubs_[cell]; }
     // Climate, read-only for observers such as the renderer.
     const std::array<std::int8_t, climate_nodes>& rainfall() const { return rainfall_; }
     bool weather_active() const;
