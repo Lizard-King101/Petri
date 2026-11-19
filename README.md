@@ -97,18 +97,10 @@ ESP32 and a save-and-restore in either place.
 
 ```mermaid
 flowchart LR
-    subgraph ESP32["ESP32 · 240 MHz · ~157 KB heap"]
-        W["World<br/>128×64 cells, 320 creatures"]
-        B["Brains<br/>320 × 247 bytes, mostly in instruction RAM"]
-        W --- B
-    end
-    subgraph SAMD["SAMD51 · 120 MHz · 192 KB"]
-        R["Panel renderer<br/>30 fps"]
-        Q["QSPI flash<br/>4 rotating 256 KiB saves"]
-    end
-    ESP32 -- "SPI link: render stream and checkpoints" --> SAMD
-    R --> P["64×32 LED panel"]
-    USB["USB: commands, status, ESP32 bridge"] --- SAMD
+    E["<b>ESP32</b><br/>240 MHz<br/>world and brains"] -- "SPI: render stream,<br/>checkpoints" --> S["<b>SAMD51</b><br/>120 MHz<br/>renderer, 30 fps"]
+    S --> P["64×32<br/>LED panel"]
+    S <--> Q["QSPI flash<br/>4 rotating saves"]
+    U["USB<br/>commands, status"] <--> S
 ```
 
 | Measured on the board | |
