@@ -2,8 +2,9 @@
 
 **Status:** November 18, 2026. Phase 1 runs natively behind `--brains`
 (`core/brains_world.cpp`), with founders bred by `apps/nursery.cpp`. It does
-not pass the gates: see First results. Phase 2 is not started, the board has
-not run it, and checkpoints do not hold brains.
+worlds last on all eight seeds, but it does not pass the gates: see Results.
+Phase 2 is not started, the board has not run it, and checkpoints do not hold
+brains.
 This document supersedes simulation steps 3 and 4 of
 [GRAPHICS_AND_EVOLUTION.md](GRAPHICS_AND_EVOLUTION.md).
 
@@ -116,6 +117,12 @@ cells against 18), which would have built a heading into the shared scorer.
 | signal | signal flashes seen, closeness-weighted |
 | habitat | how much better the ground there matches the creature's moisture preference than the ground underfoot |
 | wall | closeness of the world's edge, which otherwise looks like empty ground |
+| step | plant food on the next cell that way, scaled like food underfoot |
+
+The step sense was added after the first results. The quadrant sums blur the
+one cell a step reaches: it carries 6 of a quadrant's 56 closeness weights. The
+fixed rules compare the four neighboring cells directly, and brains without
+that sight grazed too poorly to found a world reliably (see Results).
 
 Every input is scaled to an int8. The scales come from the observatory world
 (seeds 1, 14, 42, 2026 to tick 30,000): the plant sum has a median of 63 and a
@@ -136,16 +143,16 @@ damage taken last tick, and two memory values fed back from the previous tick.
 
 | Part | Inputs | Hidden | Outputs | Bytes (int8 weights + biases) |
 | --- | ---: | ---: | ---: | ---: |
-| Direction scorer, shared across 4 directions | 9 direction + 10 self = 19 | 6 | 1 move score | 19×6 + 6 + 6 + 1 = 127 |
-| Global head | 10 self + 9 averaged = 19 | 4 | stay, sprint, breed, signal, memory ×2 = 6 | 19×4 + 4 + 4×6 + 6 = 110 |
-| **Total** | | | | **237** |
+| Direction scorer, shared across 4 directions | 10 direction + 10 self = 20 | 6 | 1 move score | 20×6 + 6 + 6 + 1 = 133 |
+| Global head | 10 self + 10 averaged = 20 | 4 | stay, sprint, breed, signal, memory ×2 = 6 | 20×4 + 4 + 4×6 + 6 = 114 |
+| **Total** | | | | **247** |
 
 - The creature picks the highest-scoring of {stay, four directions}. Equal
   move scores keep the direction examined first, and that direction rotates by
   a hash of the creature's ID and the tick, so ties favor no heading. Staying
   wins a tie with the best move.
 - The self inputs' share of each scorer unit is the same for all four
-  directions and is summed once. That removes 180 of 580 multiply-adds with
+  directions and is summed once. That removes 180 of 608 multiply-adds with
   identical results.
 - Sprint takes a second step at double cost.
 - It eats at the cell where it ends the tick, choosing the food its digestion
@@ -155,7 +162,7 @@ damage taken last tick, and two memory values fed back from the previous tick.
 - Signal sets a flash that others sense next tick.
 - Hidden units use a clipped linear activation in integer arithmetic.
 
-Cost per creature per tick is about 400 multiply-adds plus the 84-cell
+Cost per creature per tick is about 430 multiply-adds plus the 84-cell
 sensing scan. See the measured figures below.
 
 ### Measured cost
@@ -182,11 +189,11 @@ ESP32. Natively, per decision:
 | | Prototype | `core/brain.cpp` |
 | --- | ---: | ---: |
 | Sensing scan | 0.16 µs | 0.29 µs |
-| Network | 0.19 µs | 0.13 µs |
-| Scan and network | 0.34 µs | 0.41 µs |
+| Network | 0.19 µs | 0.14 µs |
+| Scan and network | 0.34 µs | 0.43 µs |
 
 The prototype column is the figure recorded above, from another machine. The
-network is faster with two more inputs per direction. The scan is slower: it
+network is faster with three more inputs per direction. The scan is slower: it
 adds the fruit, habitat, and signal senses and reads the packed 9-bit
 occupancy grid behind a 1 KB bitmap built once per tick, where the prototype
 used a 16 KB array the board has no room for. The `BRAIN` checksums changed
@@ -255,21 +262,21 @@ of the tick.
   block is 110 KB and the `World` is already 86 KB.
 - It also has 81 KB of instruction RAM that allows only 32-bit access and is
   currently unused.
-- 237 bytes pad to 60 words; × 320 slots = 76,800 bytes, so brains live in
+- 247 bytes pad to 62 words; × 320 slots = 79,360 bytes, so brains live in
   their own array in that 32-bit-only memory. Weights are packed four to a
   word and read with 32-bit loads, and writes (mutation, restore) use word
   read-modify-write.
 - **That memory is too small with Bluetooth on.** The README's heap table
   records 81,212 bytes of it free without a radio and 34,152 with NimBLE
-  advertising. With Bluetooth the array must shrink or move. The options,
+  advertising. Even without a radio the array leaves under 2 KB of it. With Bluetooth the array must shrink or move. The options,
   cheapest first: tune NimBLE's buffers and measure again; split the array
   between this memory and the normal heap; lower the slot count (256 slots
-  need 61,440 bytes); shrink the hidden layers (34 KB allows 106 bytes per
+  need 63,488 bytes); shrink the hidden layers (34 KB allows 106 bytes per
   brain at 320 slots).
 - The boot peak has the same problem. The 94 KB restore buffer and the 86 KB
   world do not fit the roughly 122 KB of heap measured with Bluetooth up, so
   streaming restore is needed for Bluetooth with or without brains.
-- The checkpoint grows by the same amount, to about 171 KB. Version 18
+- The checkpoint grows by the same amount, to about 174 KB. Version 18
   checkpoints hold no brains, so they resume only with brains off. The 96 KiB QSPI
   slots become four 256 KiB slots: 1 MiB of the 2 MiB flash.
 - Restore must stream into place instead of through a full-size buffer,
@@ -313,54 +320,68 @@ creature. `--random-founder-brains` skips the bred pool.
 ### The nursery
 
 Founders with random weights went extinct within 300 ticks on all eight
-seeds. `petri_nursery` (run from the 128×64 build) breeds a pool into
-`core/founder_brains.hpp`:
+seeds. `petri_nursery` (run from the 128×64 build, about two minutes) breeds
+a pool into `core/founder_brains.hpp`:
 
 - A brain is scored by 600-tick runs in which all 32 founders carry it, so it
   meets every founding body and place: creatures left at the end, births,
-  founders' lifetimes, and food eaten. The best 8 of 32 are kept and mutated.
-  After 20 rounds, worlds founded from the kept 8 sustained themselves.
+  founders' lifetimes, and food eaten. The best 8 of 32 are kept and mutated
+  until worlds founded from the kept 8 sustain themselves.
 - It selects only for founding a lasting population. Its seeds (7001–7008)
   are not the experiment seeds.
-- The committed pool is one family of 8 brains. It founds and sustains 6 of
-  the 8 nursery worlds for 20,000 ticks.
-- Of 12 families bred in a trial, 2 reached viability. Each alone sustained 6
-  of 8 worlds; mixed, they sustained 2 of 8.
+- Four families are bred. Each is proven for 20,000 ticks on the nursery
+  seeds and on eight more (7101–7108) it never met, and the steadiest becomes
+  the pool of 8 brains. With the step sense all four families reached
+  viability within 40 rounds; three sustained 16 of 16 worlds and one 15.
 - Survivors of long runs make poor founders. Brains taken from the living
   after 30,000 ticks went extinct within a few dozen births in every fresh
   world. They fit the bodies and the grazed-down world they evolved with.
+  (Measured before the step sense.)
 - An earlier score that counted a founder's own feeding bred foragers that
   never chose to breed, with 150 energy and a full nutrient load.
+- Without the step sense, 2 of 12 families reached viability. Each alone
+  sustained 6 of 8 nursery worlds, and the two mixed sustained 2 of 8.
 
-### First results
+The pool must be bred again after any change to the senses, the network, or
+the brains world's physics.
 
-Observatory world, seeds 1, 2, 3, 4, 14, 42, 101, 2026, 50,000 ticks:
+### Results
+
+Observatory world, seeds 1, 2, 3, 4, 14, 42, 101, 2026, 50,000 ticks (the
+gates ask for 100,000):
 
 | | Fixed rules | Brains | Shuffled control | Neutral control |
 | --- | ---: | ---: | ---: | ---: |
-| Seeds with a population at the end | 8 | 4 | 4 | 0 |
-| Population at the end, where alive | 40–74 | 46–51 | 39–100 | — |
-| Kills per run, where alive | 1–8 | 1,887–3,725 | 2,378–2,630 | — |
-| Attacks per run, where alive | 4–37 | 36,959–75,261 | 46,461–53,967 | — |
-| Meat eaten per run, where alive | 465–1,054 | 11,733–24,836 | 13,883–16,429 | — |
-| Plants eaten per run, where alive | 6.6–7.4 million | 6.7–7.3 million | 6.3–7.2 million | — |
+| Seeds with a population at the end | 8 | 8 | 8 | 0 |
+| Population at the end | 40–74 | 35–88 | 34–75 | 0 |
+| Births per run | 18,739–20,796 | 12,977–28,537 | 8,804–26,406 | 0–2 |
+| Kills per run | 1–8 | 23–1,808 | 2–2,072 | — |
+| Attacks per run | 4–37 | 325–36,069 | 41–41,758 | — |
+| Meat eaten per run | 465–1,054 | 195–10,359 | 32–11,862 | — |
+| Plants eaten per run | 6.6–7.4 million | 6.6–7.4 million | 6.4–7.5 million | — |
 | Creatures eating mostly meat | 0 | 0 | 0 | — |
 | Founding lineages left | 1 | 1 | 1 | — |
-| Native speed, ticks/s | 25,300–26,800 | 18,500–19,100 | 17,400–18,700 | — |
+| Native speed, ticks/s | 25,300–26,800 | 17,300–19,200 | 17,800–21,200 | — |
 
-- **Hunting appeared.** Where the world lasts, creatures attack tens of
-  thousands of times and kill thousands, against single digits under the
-  fixed rules. About one attack in twenty lands. Meat is still under 0.4% of
-  intake, and nothing lives on it: that is Phase 2's economics.
-- **Half the worlds die.** Seeds 3, 42, and 101 failed at founding, within 38
-  births; seed 2 collapsed after 1,132 births. The extinction gate needs 0.
-- **Inheritance of behavior has shown no effect yet.** The shuffled control
-  sustains as many worlds with as many kills. Over 50,000 ticks the founders'
-  brains explain the result, and evolution of the brains is not demonstrated.
-- **Random action cannot live.** The neutral control was extinct within two
-  births on every seed, so it cannot serve as a baseline for the pigment or
-  lineage gates. The shuffled control can.
+- **Founding is reliable.** Every world lasts. Before the step sense, four of
+  the eight went extinct, three of them within 38 births: in each world 20 to
+  28 of the 32 founders starved in the first 50 ticks, and the 2 to 8 left
+  either recovered or did not.
+- **Hunting varies by world.** Median kills are about 120 against 4 under the
+  fixed rules, and two worlds pass 1,500. About one attack in twenty lands.
+  Meat stays under 0.2% of intake, and plant digestion sits at its maximum of
+  15 in every world. Nothing lives on meat: that is Phase 2's economics.
+- **Inheritance of behavior is not shown.** The shuffled control lasts as
+  well, with kills in the same range. Brains have more births on five of the
+  eight seeds. Over 50,000 ticks the founders' brains explain the result.
+- **Random action cannot live.** The neutral control is extinct within two
+  births on every seed, so it cannot be a baseline for the pigment or lineage
+  gates. The shuffled control can.
 - The carrying capacity did not move: about 50 creatures either way.
+
+Against the gates: extinctions pass (0 of 8). Meat-eaters (0 of 8 seeds) and
+founding lineages (1) fail, as under the fixed rules. Pigment and clustering
+are not measured yet. The ESP32 gates wait for the board.
 
 ## Phase 2: trophic economics
 
@@ -413,11 +434,10 @@ command and result, as it does today.
    150–250 creatures.
 5. ~~Build the Phase 1 world behind a `--brains` flag, with decide-then-act,
    keeping the current rules intact for comparison.~~ Done.
-6. ~~Build the nursery and evolve founder brains natively.~~ Done; the gates
-   fail (see First results).
-7. Make founding reliable. Three of four extinctions happen within 38 births.
-   Candidates: prove the nursery's pool on more worlds and longer runs before
-   accepting it; find why two viable families fail together.
-8. Phase 2 economics, so that the thousands of kills can feed a meat-eater.
+6. ~~Build the nursery and evolve founder brains natively.~~ Done; see Results.
+7. ~~Make founding reliable.~~ Done with the step sense: 8 of 8 worlds last.
+8. Phase 2 economics, so that kills can feed a meat-eater. Then run the
+   gates at 100,000 ticks, with pigment match and clustering measured against
+   the shuffled control.
 9. Put brains in the checkpoint (a new version, streamed restore) and choose
    where the array lives on the ESP32.

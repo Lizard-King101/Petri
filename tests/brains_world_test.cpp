@@ -104,6 +104,8 @@ void check_run(std::uint32_t seed, bool neutral, bool shuffled) {
     }
     // Random actions seldom keep a creature alive long enough to breed.
     check(neutral || world.metrics().births > 0, "No creature ever bred");
+    // The founder pool is bred in the 128 by 64 world and must found a lasting population there.
+    check(!wide_world || neutral || world.metrics().population >= 10, "The bred founders did not found a population");
 
     // A copy carries its own brains and continues identically.
     World copy = world;
@@ -165,7 +167,7 @@ void check_inheritance() {
 
 int main() {
     check_requirements();
-    for (const std::uint32_t seed : {1u, 14u, 42u}) {
+    for (const std::uint32_t seed : {1u, 3u, 14u, 42u, 101u}) {
         check_run(seed, false, false);
     }
     check_run(14, true, false);

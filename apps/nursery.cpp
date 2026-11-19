@@ -5,14 +5,13 @@
 // what a founder needs: starting a population that lasts, from any of the 32
 // founding bodies and places, in the observatory world's own physics. A brain
 // is scored by short runs in which all 32 founders carry it. The best are kept
-// and mutated until worlds founded from them sustain themselves, and the
-// family is then proven over long runs. What the
+// and mutated until worlds founded from them sustain themselves. What the
 // creatures then do with their brains is left to evolution in the world.
 //
-// One family makes up the pool. Of twelve bred in a trial, two reached
-// viability; each alone sustained 6 of 8 nursery worlds for 20,000 ticks, and
-// the two mixed sustained 2 of 8. `families_bred` and `families_used` are kept
-// for trying that again.
+// Several families are bred independently. Each is proven over long runs, on
+// the nursery's worlds and on others it never met, and the steadiest becomes
+// the pool. Families are not mixed: before the next-cell food sense existed,
+// two viable families that each sustained 6 of 8 worlds sustained 2 of 8 together.
 //
 // The pool is not taken from the survivors of long runs. Those brains fit the
 // bodies and the grazed-down world they evolved with, and fail to found a new
@@ -39,7 +38,9 @@ using namespace petri;
 using Brain = std::array<std::int8_t, brain::brain_bytes>;
 
 constexpr std::array<std::uint32_t, 8> nursery_seeds{7001, 7002, 7003, 7004, 7005, 7006, 7007, 7008};
-constexpr int families_bred = 1, families_used = 1, family_size = 32, kept = 8, screened_brains = 1024;
+// A family is proven on these as well, which it never met while it was bred.
+constexpr std::array<std::uint32_t, 8> proving_seeds{7101, 7102, 7103, 7104, 7105, 7106, 7107, 7108};
+constexpr int families_bred = 4, families_used = 1, family_size = 32, kept = 8, screened_brains = 1024;
 constexpr int trial_ticks = 600, trials_per_round = 2, viable_ticks = 4000, proving_ticks = 20000;
 constexpr int round_limit = 40;
 // A world counts as sustained with this many creatures at the end of a run.
@@ -132,6 +133,11 @@ int sustained(const std::vector<Brain>& pool, int ticks) {
     for (const auto seed : nursery_seeds) {
         count += run(pool, seed, seed, ticks).metrics().population >= sustained_population;
     }
+    if (ticks == proving_ticks) {
+        for (const auto seed : proving_seeds) {
+            count += run(pool, seed, seed, ticks).metrics().population >= sustained_population;
+        }
+    }
     return count;
 }
 
@@ -216,7 +222,7 @@ int main(int argc, char** argv) {
         auto brains = breed(family);
         if (!brains.empty()) {
             const int worlds = sustained(brains, proving_ticks);
-            std::printf("family=%d sustains %d of %zu worlds for %d ticks\n", family, worlds, nursery_seeds.size(),
+            std::printf("family=%d sustains %d of %zu worlds for %d ticks\n", family, worlds, nursery_seeds.size() + proving_seeds.size(),
                         proving_ticks);
             std::fflush(stdout);
             bred.emplace_back(worlds, std::move(brains));
@@ -235,8 +241,8 @@ int main(int argc, char** argv) {
     }
     const int worlds = pool.empty() ? 0 : sustained(pool, proving_ticks);
     std::printf("pool of %zu founds and sustains %d of %zu nursery worlds for %d ticks\n", pool.size(), worlds,
-                nursery_seeds.size(), proving_ticks);
-    if (worlds * 2 < int(nursery_seeds.size())) {
+                nursery_seeds.size() + proving_seeds.size(), proving_ticks);
+    if (worlds * 2 < int(nursery_seeds.size() + proving_seeds.size())) {
         std::fprintf(stderr, "The pool does not found self-sustaining worlds\n");
         return 1;
     }

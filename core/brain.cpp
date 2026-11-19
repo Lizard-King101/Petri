@@ -123,6 +123,11 @@ Senses sense(const World& world, const Sight& sight, int slot, const Inner& inne
         out[in_signal] = input(signal * 4);
         out[in_habitat] = input((mismatch * weight - mismatches) / 64);
         out[in_wall] = input(to_edge[d] < radius ? (radius - to_edge[d]) * 21 : 0);
+        if (to_edge[d] > 0) {
+            // The quadrant sums blur the one cell a step would reach, so it is also sensed alone.
+            const int next = (y + step_y[d]) * width + x + step_x[d];
+            out[in_step] = input((cells[next].plants * digestion + world.fruit_at(next) * fruit_value) >> 1);
+        }
     }
 
     int neighbors = 0;

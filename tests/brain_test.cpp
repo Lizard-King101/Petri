@@ -203,6 +203,13 @@ void check_senses() {
             check(in[in_meat] == std::min(127, meat[d]), "The meat sense is wrong");
             check(in[in_near] == nearest[d] * 18, "The nearest-creature sense is wrong");
             check((in[in_wall] != 0) == (to_edge[d] < radius), "The wall sense is wrong");
+            int step_food = 0;
+            if (to_edge[d] > 0) {
+                const int next = (y + step_y[d]) * width + x + step_x[d];
+                step_food = std::min(127, (world.cells()[next].plants * me.genes.digestion +
+                                           world.fruit_at(next) * (me.genes.digestion + 8)) >> 1);
+            }
+            check(in[in_step] == step_food, "The next-cell food sense is wrong");
             check(in[in_near] || (!in[in_size] && !in[in_resemblance]), "An absent creature has traits");
             check(in[in_signal] == 0, "A signal was sensed though none was flashed");
             seen += in[in_near] != 0;
@@ -278,7 +285,7 @@ void check_inheritance() {
 } // namespace
 
 int main() {
-    static_assert(brain_bytes == 237 && brain_words == 60);
+    static_assert(brain_bytes == 247 && brain_words == 62);
     check_quadrants();
     check_network();
     check_senses();

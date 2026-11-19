@@ -27,8 +27,9 @@ enum DirectionInput : std::uint8_t {
     in_signal,      // signal flashes, closeness-weighted
     in_habitat,     // how much better the ground there suits my moisture preference
     in_wall,        // closeness of the world's edge
+    in_step,        // plant food on the next cell that way, as it is sensed underfoot
 };
-inline constexpr int direction_inputs = in_wall + 1;
+inline constexpr int direction_inputs = in_step + 1;
 
 enum SelfInput : std::uint8_t {
     self_energy,
